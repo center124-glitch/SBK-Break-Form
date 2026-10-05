@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <!--
-  SBK_Break_Form_v7.html — แอปฟอร์มแจ้งพักพนักงาน (v7)
+  SBK_Break_Form_v8.html — แอปฟอร์มแจ้งพักพนักงาน (v8)
+  v8: แก้ "รูปแนบไม่ติดบนรูปสลิป" (รูปจาก Google Drive ถูกบล็อก CORS ตอนสร้างรูป → ตอนนี้แปลงเป็น data URL ก่อน capture, ดึงรูปไม่ได้จะแจ้งเตือนแทนกรอบว่าง) • ตัดปุ่มส่งเข้า LINE ออก → เหลือ "บันทึกสลิปลงเครื่อง" แล้วส่งต่อเอง • ต้องใช้คู่กับ Code_Break_v4.gs
   v7: แนบรูปได้เฉพาะ "ถ่ายรูป" (ตัดเลือกจากคลัง) + ประทับวันเวลาลงภาพ, กันรูปเก่า, กล้องในหน้าเว็บสำหรับคอมพิวเตอร์,
       Error handling กลาง, กันเวลากลับก่อนเวลาเริ่ม, กันรายการค้าง >24 ชม., รวมข้อมูลจาก server เมื่อกดกลับซ้อนจาก 2 เครื่อง
   v6: ตัดป้ายสถานะ (กำลังพัก/พักแล้ว 1/ครบ 2 ช่วง) ออกจากรายการตัวเลือกพนักงาน • การ์ดพนักงานแสดงสถานะเฉพาะของวันนี้
@@ -320,7 +321,7 @@
         <div class="sec-h mt-6 mb-3"><span class="sec-ic" style="--c1:#818cf8;--c2:#a855f7">📷</span><div><div class="sec-t">แนบรูปเมื่อกลับจากพัก <span class="text-xs font-normal text-slate-500">(ไม่บังคับ)</span></div></div></div>
         <div class="photo-box" data-target="end"></div>
         <button id="btnEnd" class="btn w-full mt-5 !py-4 text-lg text-white bg-gradient-to-r from-indigo-500 via-violet-500 to-fuchsia-500 shadow-xl shadow-violet-500/30 hover:brightness-105 !rounded-2xl">⏹️ กลับจากพัก</button>
-        <button id="btnActiveSlip" class="btn btn-ghost w-full mt-2 text-sm">🧾 ดูสลิป / แจ้งเริ่มพักเข้า LINE</button>
+        <button id="btnActiveSlip" class="btn btn-ghost w-full mt-2 text-sm">🧾 ดูสลิป / บันทึกสลิปลงเครื่อง</button>
       </div>
 
       <div id="donePanel" class="card p-6 hidden text-center fade-in">
@@ -364,9 +365,8 @@
     <div class="w-full max-w-md">
       <div class="flex justify-center"><div id="slipWrap" class="rounded-2xl overflow-hidden shadow-2xl"></div></div>
       <div class="card p-3 mt-3 grid grid-cols-2 gap-2">
-        <button id="slipShareImg" class="btn text-white bg-[#06C755] hover:brightness-95 col-span-2 !py-3">💬 ส่งรูปสลิปเข้า LINE</button>
-        <button id="slipShareText" class="btn btn-ghost text-sm">📝 ส่งข้อความเข้า LINE</button>
-        <button id="slipSaveImg" class="btn btn-ghost text-sm">🖼️ บันทึกรูปสลิป</button>
+        <button id="slipSaveImg" class="btn btn-brand col-span-2 !py-3">💾 บันทึกสลิปลงเครื่อง</button>
+        <div class="col-span-2 text-center text-xs text-slate-500 dark:text-slate-400">บันทึกเป็นรูป .jpg ลงเครื่อง แล้วนำไปส่งต่อเองได้ทุกช่องทาง</div>
         <button id="slipClose" class="btn btn-ghost col-span-2 text-sm">ปิด</button>
       </div>
     </div>
@@ -693,7 +693,7 @@ const Splash = {
 };
 
 /* =====================================================================
-   COMMON 8) SLIP — สลิปสรุปการพัก + แชร์รูป/ข้อความเข้า LINE (ผ่านเมนูแชร์ของเครื่อง)
+   COMMON 8) SLIP — สลิปสรุปการพัก + บันทึกรูปสลิปลงเครื่อง (ผู้ใช้ส่งต่อเอง)
    ===================================================================== */
 const photoOf = (r, which) => r['photo' + which] || r['photo' + which + 'Url'] || '';
 function slipHTML(r) {
@@ -701,7 +701,7 @@ function slipHTML(r) {
   const head = { over: '#dc2626', active: '#d97706', forgot: '#7c3aed', ontime: '#059669' }[st];
   const icon = { over: '⚠️', active: '⏳', forgot: '❓', ontime: '✅' }[st];
   const dur = r.end ? fmtDur(r.durationSec) : `${fmtDur(elapsedSec(r))} (ยังไม่กลับ)`;
-  const ph = [['เริ่มพัก' + (r.photoStartAt ? ' • ' + fmtTimeS(r.photoStartAt) : ''), photoOf(r, 'Start')], ['กลับจากพัก' + (r.photoEndAt ? ' • ' + fmtTimeS(r.photoEndAt) : ''), photoOf(r, 'End')]].filter(x => x[1]);
+  const ph = [['เริ่มพัก' + (r.photoStartAt ? ' • ' + fmtTimeS(r.photoStartAt) : ''), photoOf(r, 'Start'), 'Start'], ['กลับจากพัก' + (r.photoEndAt ? ' • ' + fmtTimeS(r.photoEndAt) : ''), photoOf(r, 'End'), 'End']].filter(x => x[1]);
   const row = (k, v, c) => `<div style="display:flex;justify-content:space-between;gap:12px;padding:5px 0;border-bottom:1px dashed #e2e8f0;font-size:14px"><span style="color:#64748b">${k}</span><span style="font-weight:600;text-align:right;${c ? 'color:' + c : ''}">${v}</span></div>`;
   return `<div id="slipCard" style="width:360px;background:#fff;color:#0f172a;font-family:Sarabun,sans-serif;line-height:1.6">
     <div style="background:${head};color:#fff;padding:16px 18px 14px">
@@ -723,56 +723,90 @@ function slipHTML(r) {
       ${row('เกณฑ์ที่กำหนด', `ไม่เกิน ${Number(r.limitMin) || CONFIG.LIMIT_MIN} นาที`)}
       ${r.note ? row('หมายเหตุ', esc(r.note)) : ''}
       ${r.closedBy ? row('ปิดรายการโดย', esc(r.closedBy)) : ''}
-      ${ph.length ? `<div style="display:grid;grid-template-columns:repeat(${ph.length},1fr);gap:8px;margin-top:10px">${ph.map(([l, s]) => `<div><img src="${esc(s)}" referrerpolicy="no-referrer" style="width:100%;height:${ph.length > 1 ? 120 : 190}px;object-fit:cover;border-radius:10px;border:1px solid #e2e8f0;cursor:zoom-in" data-zoom><div style="font-size:11px;color:#64748b;text-align:center;margin-top:2px">${l}</div></div>`).join('')}</div>` : ''}
+      ${ph.length ? `<div style="display:grid;grid-template-columns:repeat(${ph.length},1fr);gap:8px;margin-top:10px">${ph.map(([l, s, w]) => `<div><img src="${esc(s)}" data-ph="${w}" referrerpolicy="no-referrer" style="width:100%;height:${ph.length > 1 ? 120 : 190}px;object-fit:cover;border-radius:10px;border:1px solid #e2e8f0;cursor:zoom-in" data-zoom><div style="font-size:11px;color:#64748b;text-align:center;margin-top:2px">${l}</div></div>`).join('')}</div>` : ''}
       <div style="text-align:center;font-size:11px;color:#94a3b8;margin:12px 0 4px">ออกโดยระบบแจ้งพักพนักงาน • ${CONFIG.ORG}<br>พิมพ์เมื่อ ${fmtDateBE(nowDate(), true)} ${fmtTimeS(nowDate().toISOString())} น.</div>
     </div>
     <div style="height:12px;background:radial-gradient(circle at 6px 0, transparent 6px, #fff 6.5px) repeat-x;background-size:12px 12px;background-color:#f1f5f9"></div>
   </div>`;
 }
-let slipRec = null;
+/* ---------- รูปแนบบนสลิป ----------
+   สาเหตุที่รูปว่างในไฟล์สลิป (v7): รูปที่ดึงจาก Google Drive (drive.google.com/thumbnail) ไม่ส่ง header CORS
+   → <img> บนหน้าจอแสดงได้ แต่ html2canvas อ่านพิกเซลไม่ได้ จึงวาดได้แค่กรอบเปล่า (เจอเมื่อเปิดสลิปจากเครื่องอื่น/วันก่อน
+   หรือเมื่อรูปในเครื่องไม่เหลือแล้ว)
+   วิธีแก้ (v8): ก่อนสร้างรูปสลิป แปลงรูปทุกใบเป็น data URL ก่อน แล้วค่อย capture — รูปที่ดึงไม่ได้จริงจะขึ้นข้อความแจ้ง ไม่ปล่อยเป็นกรอบเปล่า */
+const _photoCache = new Map();
+const driveId = u => { const m = String(u || '').match(/[?&]id=([\w-]{10,})/) || String(u || '').match(/\/d\/([\w-]{10,})/); return m ? m[1] : ''; };
+function imgToDataUrl(src) {
+  return new Promise((res, rej) => {
+    const i = new Image(); i.crossOrigin = 'anonymous';
+    const t = setTimeout(() => rej(new Error('timeout')), 15000);
+    i.onload = () => { clearTimeout(t);
+      try { const c = document.createElement('canvas'); c.width = i.naturalWidth; c.height = i.naturalHeight; c.getContext('2d').drawImage(i, 0, 0);
+        const d = c.toDataURL('image/jpeg', 0.85); d.length > 1000 ? res(d) : rej(new Error('empty')); } catch (e) { rej(e); } };
+    i.onerror = () => { clearTimeout(t); rej(new Error('load')); };
+    i.src = src;
+  });
+}
+async function photoDataUrl(src) {
+  if (!src) return '';
+  if (/^data:image\//.test(src)) return src;
+  if (_photoCache.has(src)) return _photoCache.get(src);
+  const id = driveId(src); let out = '';
+  // 1) ขอไฟล์จาก server (Code_Break_v4 → action=photo) — ไม่ติด CORS
+  if (id) { try { const r = await jsonp({ action: 'photo', id }, 30000); if (r && r.ok && /^data:image\//.test(r.dataUrl || '')) out = r.dataUrl; } catch (e) { logError('photo.gas', e); } }
+  // 2) สำรอง (กรณียังใช้ Code.gs รุ่นเก่า): โหลดผ่าน lh3 แล้วค่อยลอง URL เดิม ด้วย CORS
+  if (!out) for (const u of [id && `https://lh3.googleusercontent.com/d/${id}=w1000`, src].filter(Boolean)) { try { out = await imgToDataUrl(u); if (out) break; } catch (e) { /* ลองวิธีถัดไป */ } }
+  if (out) { if (_photoCache.size >= 30) _photoCache.delete(_photoCache.keys().next().value); _photoCache.set(src, out); }
+  return out;
+}
+
+let slipRec = null, slipTok = 0, slipReady = Promise.resolve();
 function openSlip(r) {
   if (!r) return toast('ไม่พบข้อมูลสลิป', 'err');
-  slipRec = r; $('#slipWrap').innerHTML = slipHTML(r);
+  slipRec = r; const tok = ++slipTok;
+  $('#slipWrap').innerHTML = slipHTML(r);
   $$('[data-zoom]', $('#slipWrap')).forEach(i => i.onclick = () => openLightbox(i.src));
   $('#slipModal').classList.remove('hidden');
+  slipReady = resolveSlipPhotos(tok); // ดึงรูปเป็น data URL ไว้ล่วงหน้า (เปิดสลิปแล้วเริ่มทำเลย ตอนกดบันทึกจะพร้อมแล้ว)
 }
-function lineText(r) {
-  const st = calcStatus(r); const icon = { over: '⚠️', active: '⏳', forgot: '❓', ontime: '✅' }[st];
-  return [`${icon} แจ้งพักพนักงาน SBK`, `ชื่อ: ${r.name}`, `รหัส: ${r.empId}`, `ตำแหน่ง: ${r.position || '-'}`,
-    `ช่วงพัก: ช่วงที่ ${r.breakNo}`, `วันที่: ${fmtDateBE(keyToDate(r.date))}`,
-    `เริ่มพัก: ${fmtTime(r.start)} น.`, `กลับจากพัก: ${r.end ? fmtTime(r.end) + ' น.' : 'ยังไม่กลับ'}`,
-    `ระยะเวลา: ${r.end ? fmtDur(r.durationSec) : fmtDur(elapsedSec(r)) + ' (กำลังพัก)'}`, `สถานะ: ${statusText(r)}`,
-    r.note ? `หมายเหตุ: ${r.note}` : '', `เลขที่: ${slipNo(r)}`].filter(Boolean).join('\n');
+async function resolveSlipPhotos(tok) {
+  const wrap = $('#slipWrap');
+  await Promise.all($$('img[data-ph]', wrap).map(async im => {
+    const d = await photoDataUrl(im.getAttribute('src')).catch(() => '');
+    if (tok !== slipTok || !d) return; // เปิดสลิปใบใหม่ไปแล้ว หรือดึงรูปไม่สำเร็จ (ไม่ใส่ data-ready → ตอนบันทึกจะแจ้งเตือน)
+    im.src = d; try { await im.decode(); } catch (e) { return; }
+    if (im.naturalWidth > 0) im.dataset.ready = '1';
+  }));
 }
 async function slipBlob() {
   if (typeof html2canvas === 'undefined') throw new Error('โหลดไลบรารีสร้างรูปไม่สำเร็จ');
+  await slipReady; // รอรูปแนบถูกแปลงเสร็จก่อน capture
+  const bad = $$('img[data-ph]:not([data-ready])', $('#slipWrap'));
+  bad.forEach(im => { // รูปที่ดึงไม่ได้จริง → แทนด้วยข้อความ ไม่ปล่อยกรอบว่างให้เข้าใจผิด
+    const d = document.createElement('div');
+    d.style.cssText = im.style.cssText.replace(/cursor:[^;]*;?/, '') + ';display:flex;align-items:center;justify-content:center;background:#f8fafc;color:#94a3b8;font-size:12px;text-align:center;padding:6px';
+    d.textContent = 'ไม่สามารถโหลดรูปแนบได้'; im.replaceWith(d);
+  });
+  if (bad.length) toast('ดึงรูปแนบไม่สำเร็จ สลิปนี้จึงไม่มีรูป — ตรวจอินเทอร์เน็ตแล้วเปิดสลิปใหม่อีกครั้ง', 'warn', 8000);
   await document.fonts.ready; // รอฟอนต์ไทยโหลดครบก่อน capture
   const c = await capture($('#slipCard'), { scale: 2, useCORS: true, backgroundColor: '#ffffff', logging: false });
   return new Promise(res => c.toBlob(res, 'image/jpeg', 0.92));
 }
 const slipFileName = r => `Slip_${r.empId}_${r.date}_B${r.breakNo}.jpg`;
-async function shareSlipImage(btn) {
-  const r = slipRec; if (!r) return; setBusy(btn, true, 'กำลังสร้างรูปสลิป...');
-  try {
-    const blob = await slipBlob(); const file = new File([blob], slipFileName(r), { type: 'image/jpeg' });
-    // มือถือ: เปิดเมนูแชร์ของเครื่อง → เลือก LINE → เลือกกลุ่ม (LINE ไม่มีลิงก์สำหรับส่งรูปตรง ๆ)
-    if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: 'สลิปแจ้งพักพนักงาน', text: lineText(r) }); }
-    else { downloadBlob(blob, file.name); toast('เครื่องนี้แชร์รูปโดยตรงไม่ได้ — ดาวน์โหลดรูปสลิปแล้ว กรุณาแนบรูปในแชต LINE', 'info', 6000); }
-  } catch (e) { if (e.name !== 'AbortError') toast('สร้างรูปสลิปไม่สำเร็จ: ' + e.message, 'err'); }
-  finally { setBusy(btn, false); }
-}
-function shareSlipText() { if (slipRec) window.open('https://line.me/R/share?text=' + encodeURIComponent(lineText(slipRec)), '_blank', 'noopener'); }
+// v8: ตัดการส่งเข้า LINE ออก → บันทึกรูปสลิปลงเครื่อง แล้วผู้ใช้นำไปส่งต่อเองทางช่องทางที่ต้องการ
 async function saveSlipImage(btn) {
-  setBusy(btn, true, 'กำลังบันทึก...');
-  try { downloadBlob(await slipBlob(), slipFileName(slipRec)); toast('บันทึกรูปสลิปเรียบร้อย'); }
-  catch (e) { toast('บันทึกรูปไม่สำเร็จ: ' + e.message, 'err'); } finally { setBusy(btn, false); }
+  if (!slipRec) return;
+  setBusy(btn, true, 'กำลังสร้างรูปสลิป...');
+  try {
+    const blob = await slipBlob(); if (!blob) throw new Error('สร้างไฟล์รูปไม่สำเร็จ');
+    downloadBlob(blob, slipFileName(slipRec));
+    toast('บันทึกสลิปลงเครื่องแล้ว (' + slipFileName(slipRec) + ') — นำไปส่งต่อเองได้เลย', 'ok', 6000);
+  } catch (e) { toast('บันทึกรูปไม่สำเร็จ: ' + e.message, 'err', 6000); } finally { setBusy(btn, false); }
 }
 function bindCommonUI() {
   $('#btnTheme') && ($('#btnTheme').onclick = () => { toggleTheme(); document.dispatchEvent(new Event('theme:change')); });
   $('#slipClose').onclick = () => $('#slipModal').classList.add('hidden');
   $('#slipModal').onclick = e => { if (e.target === e.currentTarget || e.target.parentElement === e.currentTarget) $('#slipModal').classList.add('hidden'); };
-  $('#slipShareImg').onclick = e => shareSlipImage(e.currentTarget);
-  $('#slipShareText').onclick = shareSlipText;
   $('#slipSaveImg').onclick = e => saveSlipImage(e.currentTarget);
   $('#lightbox').onclick = () => $('#lightbox').classList.add('hidden');
   document.addEventListener('keydown', e => { if (e.key === 'Escape') { $('#lightbox').classList.add('hidden'); $('#slipModal').classList.add('hidden'); } });
