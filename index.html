@@ -1,6 +1,9 @@
 <!DOCTYPE html>
 <!--
-  SBK_Break_Form_v5.html — แอปฟอร์มแจ้งพักพนักงาน (v5)
+  SBK_Break_Form_v7.html — แอปฟอร์มแจ้งพักพนักงาน (v7)
+  v7: แนบรูปได้เฉพาะ "ถ่ายรูป" (ตัดเลือกจากคลัง) + ประทับวันเวลาลงภาพ, กันรูปเก่า, กล้องในหน้าเว็บสำหรับคอมพิวเตอร์,
+      Error handling กลาง, กันเวลากลับก่อนเวลาเริ่ม, กันรายการค้าง >24 ชม., รวมข้อมูลจาก server เมื่อกดกลับซ้อนจาก 2 เครื่อง
+  v6: ตัดป้ายสถานะ (กำลังพัก/พักแล้ว 1/ครบ 2 ช่วง) ออกจากรายการตัวเลือกพนักงาน • การ์ดพนักงานแสดงสถานะเฉพาะของวันนี้
   v5: รูปสลิปที่ส่งเข้า LINE ตัวอักษรอยู่กึ่งกลางตรงกับหน้าจอ (แก้ค่าเผื่อ baseline ของ html2canvas)
   v4: แก้การแสดงเวลาเหลือให้ พักไป + เหลือ = 45:00 พอดี (ปัดวินาทีก่อนคำนวณ)
   v3: ปรับ UI/UX ใหม่ — พื้นหลัง Aurora, การ์ดกระจก, Hero วันเวลา+สถานะวันนี้, ปุ่มช่วงพักสีแยกชัด, วงแหวนไล่สี
@@ -343,6 +346,18 @@
   </div>
 </main>
 
+<!-- กล้องในหน้าเว็บ (คอมพิวเตอร์) -->
+<div id="camModal" class="hidden fixed inset-0 z-[80] modal-bg flex items-center justify-center p-4">
+  <div class="card p-4 w-full max-w-xl">
+    <div class="sec-h mb-3"><span class="sec-ic">📷</span><div><div class="sec-t">ถ่ายรูป</div><div class="sec-s" id="camHint">กำลังเปิดกล้อง...</div></div></div>
+    <video id="camVideo" class="w-full rounded-2xl bg-black aspect-[4/3] object-cover" playsinline muted></video>
+    <div class="grid grid-cols-3 gap-2 mt-3">
+      <button id="camCancel" class="btn btn-ghost">ยกเลิก</button>
+      <button id="camShot" class="btn btn-brand !py-3">📸 ถ่ายรูป</button>
+      <button id="camFlip" class="btn btn-ghost">🔄 สลับกล้อง</button>
+    </div>
+  </div>
+</div>
 <!-- ====================== MODALS (ใช้ร่วมกัน) ====================== -->
 <div id="slipModal" class="hidden fixed inset-0 z-50 modal-bg overflow-y-auto">
   <div class="min-h-full flex items-start sm:items-center justify-center p-4">
@@ -469,7 +484,7 @@ function normalizeRecord(r) {
   const e = r.end ? new Date(r.end) : null;
   const rec = { ...r, id: String(r.id), empId: String(r.empId).trim(), breakNo: Number(r.breakNo) === 2 ? 2 : 1,
     date: dateKey(s), start: s.toISOString(), end: e && !isNaN(e) && e >= s ? e.toISOString() : null,
-    limitMin: Number(r.limitMin) || CONFIG.LIMIT_MIN, photoStartUrl: r.photoStartUrl || '', photoEndUrl: r.photoEndUrl || '' };
+    limitMin: Number(r.limitMin) >= 5 && Number(r.limitMin) <= 240 ? Number(r.limitMin) : CONFIG.LIMIT_MIN, photoStartUrl: r.photoStartUrl || '', photoEndUrl: r.photoEndUrl || '' };
   // คำนวณระยะเวลาใหม่จาก start/end เสมอ ไม่เชื่อตัวเลขที่เก็บมา (กันชีตถูกแก้มือ)
   rec.durationSec = rec.end ? Math.round((new Date(rec.end) - s) / 1000) : 0;
   return rec;
@@ -513,16 +528,21 @@ function jsonp(params, timeout = 20000) {
     const q = new URLSearchParams({ ...params, callback: cb, _: Date.now() });
     const s = document.createElement('script'); const t0 = Date.now();
     const clean = () => { delete window[cb]; s.remove(); clearTimeout(t); };
-    const t = setTimeout(() => { clean(); rej(new Error('หมดเวลาเชื่อมต่อ Google Sheets (Timeout)')); }, timeout);
+    const t = setTimeout(() => { clean(); rej(new Error('หมดเวลาเชื่อมต่อ Google Sheets — สัญญาณอินเทอร์เน็ตอาจอ่อน หรือ Web App ยังไม่ได้ Deploy เป็น "Anyone"')); }, timeout);
     window[cb] = data => { clean(); if (data && data.serverTime) Clock.update(data.serverTime, t0, Date.now()); res(data); };
     s.onerror = () => { clean(); rej(new Error('เชื่อมต่อ Google Apps Script ไม่ได้ — ตรวจสอบอินเทอร์เน็ต หรือการ Deploy (Who has access: Anyone)')); };
     s.src = CONFIG.GAS_URL + '?' + q.toString();
     document.head.appendChild(s);
   });
 }
-async function postGAS(payload) {
+async function postGAS(payload, timeout = 45000) {
   // no-cors + text/plain: Apps Script ไม่ส่ง CORS header จึงอ่านผลไม่ได้ → ต้องยืนยันผลด้วย action=status อีกรอบ
-  await fetch(CONFIG.GAS_URL, { method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(payload) });
+  if (!navigator.onLine) throw new Error('เครื่องไม่ได้เชื่อมต่ออินเทอร์เน็ต');
+  // ตั้งเวลาตัดการเชื่อมต่อ — กันกรณีเน็ตค้างแล้ว fetch ไม่จบ ทำให้คิวส่งข้อมูลหยุดนิ่ง
+  const ac = typeof AbortController !== 'undefined' ? new AbortController() : null, t = ac && setTimeout(() => ac.abort(), timeout);
+  try { await fetch(CONFIG.GAS_URL, { method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(payload), signal: ac ? ac.signal : undefined }); }
+  catch (e) { throw new Error(e && e.name === 'AbortError' ? 'ส่งข้อมูลนานเกินกำหนด (เครือข่ายช้า)' : 'ส่งข้อมูลไม่สำเร็จ — ตรวจสอบอินเทอร์เน็ต'); }
+  finally { t && clearTimeout(t); }
 }
 // ส่งแล้วถามผลซ้ำจนกว่าจะยืนยันได้ → คืน { ok:true, res } | { ok:false, error } | { ok:null } (ยังยืนยันไม่ได้ เช่นเน็ตหลุด)
 async function postAndConfirm(payload, key, isDone, tries = 7) {
@@ -532,6 +552,8 @@ async function postAndConfirm(payload, key, isDone, tries = 7) {
     try {
       const st = await jsonp({ action: 'status', id: key }, 12000);
       if (st && st.found) {
+        // retry = server ขัดข้องชั่วคราว → ถือว่ายังไม่สำเร็จ (คิวจะส่งซ้ำเอง) ไม่ใช่การปฏิเสธข้อมูล
+        if (st.retry) return { ok: null, error: st.error };
         if (st.ok === false) return { ok: false, error: st.error || 'บันทึกไม่สำเร็จ' };
         if (!isDone || isDone(st)) return { ok: true, res: st };
       }
@@ -587,6 +609,28 @@ async function capture(el, opts) {
   const P = CanvasRenderingContext2D.prototype, orig = P.fillText;
   P.fillText = function (t, x, y, ...rest) { return orig.call(this, t, x, y - h2cBaselineDelta(this), ...rest); };
   try { return await html2canvas(el, { ...opts, ...H2C_FIX }); } finally { P.fillText = orig; }
+}
+
+/* =====================================================================
+   COMMON 5.5) ERROR HANDLING กลาง — จับ error ที่หลุดทุกจุด ไม่ให้แอปค้าง + เก็บ log ไว้ตรวจสอบย้อนหลัง
+   ===================================================================== */
+const ERR_KEY = 'sbk_break_errlog';
+function logError(where, err) {
+  const msg = String((err && (err.message || err.reason)) || err || 'unknown').slice(0, 300);
+  try { const a = JSON.parse(localStorage.getItem(ERR_KEY) || '[]'); a.push({ t: new Date().toISOString(), where, msg }); localStorage.setItem(ERR_KEY, JSON.stringify(a.slice(-50))); } catch (e) {}
+  try { console.error('[SBK]', where, err); } catch (e) {}
+}
+let _lastErrToast = 0;
+function onUnexpected(where, err) {
+  logError(where, err);
+  // แจ้งผู้ใช้ไม่เกิน 1 ครั้ง/10 วินาที — กันข้อความเด้งรัว
+  if (Date.now() - _lastErrToast > 10000 && document.getElementById('toastBox')) { _lastErrToast = Date.now(); toast('เกิดข้อผิดพลาดที่ไม่คาดคิด ระบบยังทำงานต่อได้ (ถ้าเกิดซ้ำ กรุณารีเฟรชหน้า)', 'err', 6000); }
+}
+window.addEventListener('error', e => { if (e && e.target && e.target !== window) return; /* โหลด script/รูปไม่สำเร็จ จัดการที่จุดนั้นแล้ว */ onUnexpected('window.error', e.error || e.message); });
+window.addEventListener('unhandledrejection', e => onUnexpected('promise', e.reason));
+// ระบบนับวัน/ชั่วโมงตามเวลาเครื่อง — ถ้าเครื่องไม่ได้ตั้งเขตเวลาไทย (UTC+7) วันที่ในรายงานจะเพี้ยน จึงเตือนตั้งแต่เปิดแอป
+function checkTimezone() {
+  if (new Date().getTimezoneOffset() !== -420) toast('เขตเวลาของเครื่องนี้ไม่ใช่เวลาประเทศไทย (UTC+7) — กรุณาตั้งค่าวันที่/เวลาของเครื่องเป็น Bangkok เพื่อให้วันที่ถูกต้อง', 'warn', 9000);
 }
 
 /* =====================================================================
@@ -657,7 +701,7 @@ function slipHTML(r) {
   const head = { over: '#dc2626', active: '#d97706', forgot: '#7c3aed', ontime: '#059669' }[st];
   const icon = { over: '⚠️', active: '⏳', forgot: '❓', ontime: '✅' }[st];
   const dur = r.end ? fmtDur(r.durationSec) : `${fmtDur(elapsedSec(r))} (ยังไม่กลับ)`;
-  const ph = [['เริ่มพัก', photoOf(r, 'Start')], ['กลับจากพัก', photoOf(r, 'End')]].filter(x => x[1]);
+  const ph = [['เริ่มพัก' + (r.photoStartAt ? ' • ' + fmtTimeS(r.photoStartAt) : ''), photoOf(r, 'Start')], ['กลับจากพัก' + (r.photoEndAt ? ' • ' + fmtTimeS(r.photoEndAt) : ''), photoOf(r, 'End')]].filter(x => x[1]);
   const row = (k, v, c) => `<div style="display:flex;justify-content:space-between;gap:12px;padding:5px 0;border-bottom:1px dashed #e2e8f0;font-size:14px"><span style="color:#64748b">${k}</span><span style="font-weight:600;text-align:right;${c ? 'color:' + c : ''}">${v}</span></div>`;
   return `<div id="slipCard" style="width:360px;background:#fff;color:#0f172a;font-family:Sarabun,sans-serif;line-height:1.6">
     <div style="background:${head};color:#fff;padding:16px 18px 14px">
@@ -738,7 +782,7 @@ function bindCommonUI() {
 /* =====================================================================
    FORM 1) STATE & STORAGE (IndexedDB — เก็บรูปและคิวที่ยังส่งไม่สำเร็จ ไม่หายเมื่อปิดแอป)
    ===================================================================== */
-const state = { records: [], employees: [], selEmp: null, selBreak: null, photos: { start: null, end: null }, overAlerted: new Set(), online: null, pulling: false, lastPull: 0 };
+const state = { records: [], employees: [], selEmp: null, selBreak: null, photos: { start: null, end: null }, photoAt: { start: null, end: null }, overAlerted: new Set(), online: null, pulling: false, lastPull: 0 };
 const DB = {
   db: null, mem: new Map(), fallback: false,
   open() { return new Promise(res => { try { const rq = indexedDB.open('sbk_break_form_v2', 1);
@@ -781,13 +825,18 @@ async function doSync(rec, isNew) {
   } catch (e) { res = { ok: null }; }
   if (res.ok === true) {
     const sr = res.res.record || {};
-    rec.sync = 'synced'; rec.photoStartUrl = sr.photoStartUrl || rec.photoStartUrl; rec.photoEndUrl = sr.photoEndUrl || rec.photoEndUrl;
+    rec.sync = 'synced'; rec.everSynced = true; rec.photoStartUrl = sr.photoStartUrl || rec.photoStartUrl; rec.photoEndUrl = sr.photoEndUrl || rec.photoEndUrl;
+    // server เป็นตัวตัดสินสุดท้าย: ถ้าอีกเครื่องกดกลับจากพักไปก่อน (first-end-wins) หรือข้อมูลในชีตใหม่กว่า → ใช้ค่าจาก server
+    if (res.res.stale || (sr.end && sr.end !== rec.end)) {
+      const n = normalizeRecord(sr);
+      if (n) { ['end', 'durationSec', 'updatedAt', 'closedBy', 'note', 'limitMin'].forEach(k => rec[k] = n[k]); toast('ข้อมูลรายการนี้ถูกบันทึกจากอีกเครื่องก่อนแล้ว — แสดงตามข้อมูลในระบบ', 'info', 6000); }
+    }
     await DB.put(rec); setPill('ok', '● บันทึกแล้ว'); state.online = true;
   } else if (res.ok === false) {
     // server ปฏิเสธ (เช่น อีกเครื่องเริ่มพักให้พนักงานคนนี้ไปแล้ว) → ยกเลิกรายการในเครื่อง แล้วดึงข้อมูลจริงมาแสดง
     toast('บันทึกไม่สำเร็จ: ' + res.error, 'err', 7000);
-    if (isNew) { state.records = state.records.filter(r => r.id !== rec.id); await DB.del(rec.id); }
-    else { rec.sync = 'error'; await DB.put(rec); }
+    if (isNew) { state.records = state.records.filter(r => r.id !== rec.id); await DB.del(rec.id).catch(e => logError('db.del', e)); }
+    else { rec.sync = 'error'; rec.syncError = res.error; await DB.put(rec).catch(e => logError('db.put', e)); }
     setPill('err', '● ถูกปฏิเสธ'); await pull(true);
   } else {
     setPill('err', '● ค้างส่ง'); state.online = false;
@@ -828,17 +877,18 @@ async function startBreak() {
   const emp = state.selEmp, btn = $('#btnStart');
   if (!emp) return toast('กรุณาเลือกพนักงานก่อน', 'warn');
   if (!state.selBreak) return toast('กรุณาเลือกช่วงการพัก', 'warn');
-  if (activeOf(emp.id)) return toast('พนักงานท่านนี้กำลังพักอยู่แล้ว', 'warn');
+  { const a = activeOf(emp.id); if (a) return toast(calcStatus(a) === 'forgot' ? `มีรายการพักค้างตั้งแต่ ${fmtDateBE(a.date, true)} ${fmtTime(a.start)} น. — กดกลับจากพักก่อน หรือแจ้งหัวหน้าปิดรายการในแดชบอร์ด` : 'พนักงานท่านนี้กำลังพักอยู่แล้ว', 'warn', 7000); }
+  if (!state.employees.some(e => e.id === emp.id)) return toast('ไม่พบรหัสนี้ในรายชื่อพนักงานปัจจุบัน กรุณาเลือกจากรายการ', 'err');
   if (shiftOf(emp.id).some(r => r.breakNo === state.selBreak)) return toast(`ใช้สิทธิ์พักช่วงที่ ${state.selBreak} ของกะนี้ไปแล้ว`, 'warn');
   setBusy(btn, true, 'กำลังบันทึก...');
   try {
     const now = secNow(); // ตัดเศษมิลลิวินาที → เวลาที่แสดงบนสลิป/ชีต กับระยะเวลาที่คำนวณ ตรงกันทุกวินาที
     const rec = { id: uid(), date: dateKey(now), empId: emp.id, name: emp.name, position: emp.position, dept: emp.dept,
       breakNo: state.selBreak, start: now.toISOString(), end: null, durationSec: 0, limitMin: CONFIG.LIMIT_MIN,
-      photoStart: state.photos.start, photoEnd: null, photoStartUrl: '', photoEndUrl: '', note: $('#noteStart').value.trim(),
+      photoStart: state.photos.start, photoEnd: null, photoStartUrl: '', photoEndUrl: '', photoStartAt: state.photos.start ? state.photoAt.start : '', photoEndAt: '', note: $('#noteStart').value.trim(),
       device: deviceName(), closedBy: '', createdAt: now.toISOString(), updatedAt: now.toISOString(), sync: 'pending' };
     await DB.put(rec); state.records.push(rec);
-    state.photos.start = null; $('#noteStart').value = '';
+    state.photos.start = null; state.photoAt.start = null; $('#noteStart').value = '';
     toast(`เริ่มพักช่วงที่ ${rec.breakNo} เวลา ${fmtTime(rec.start)} น.`);
     renderAll(); selectEmployee(emp.id); renderPending();
     syncRecord(rec, true);
@@ -848,13 +898,18 @@ async function startBreak() {
 async function endBreak() {
   const emp = state.selEmp, rec = emp && activeOf(emp.id), btn = $('#btnEnd');
   if (!rec) return toast('ไม่พบรายการที่กำลังพักของพนักงานท่านนี้', 'warn');
+  // ค้างเกิน 24 ชม. = ข้อมูลผิดปกติ (server จะไม่รับ) → ให้หัวหน้าแก้เวลาจริงจากแดชบอร์ดแทน
+  if (elapsedSec(rec) > 24 * 3600) return toast('รายการนี้ค้างเกิน 24 ชม. ไม่สามารถกดกลับจากฟอร์มได้ — กรุณาแจ้งหัวหน้าแก้ไขเวลากลับในแอปแดชบอร์ด', 'err', 8000);
+  if (calcStatus(rec) === 'forgot' && !(await confirmBox('ยืนยันเวลากลับจากพัก', `รายการนี้เริ่มพักเมื่อ ${fmtTime(rec.start)} น. (ผ่านมา ${fmtDur(elapsedSec(rec))}) ระบบจะบันทึกเวลากลับเป็น "ตอนนี้" ถ้าไม่ตรงกับความจริง ให้หัวหน้าแก้ไขในแดชบอร์ดภายหลัง`, 'บันทึกเวลาตอนนี้', false))) return;
   setBusy(btn, true, 'กำลังบันทึก...');
   try {
-    const now = secNow(); // ตัดเศษมิลลิวินาที → เวลาที่แสดงบนสลิป/ชีต กับระยะเวลาที่คำนวณ ตรงกันทุกวินาที
+    let now = secNow(); // ตัดเศษมิลลิวินาที → เวลาที่แสดงบนสลิป/ชีต กับระยะเวลาที่คำนวณ ตรงกันทุกวินาที
+    // กรณีนาฬิกาถูกปรับย้อน (เช่นเริ่มพักตอนออฟไลน์แล้วภายหลังได้เวลา server) → ห้ามเวลากลับน้อยกว่าเวลาเริ่ม
+    if (now < new Date(rec.start)) now = new Date(rec.start);
     rec.end = now.toISOString(); rec.durationSec = Math.max(0, Math.round((now - new Date(rec.start)) / 1000));
-    if (state.photos.end) rec.photoEnd = state.photos.end;
+    if (state.photos.end) { rec.photoEnd = state.photos.end; rec.photoEndAt = state.photoAt.end; }
     rec.updatedAt = now.toISOString(); rec.everSynced = rec.everSynced || rec.sync === 'synced'; rec.sync = 'pending';
-    await DB.put(rec); state.photos.end = null; state.overAlerted.delete(rec.id);
+    await DB.put(rec); state.photos.end = null; state.photoAt.end = null; state.overAlerted.delete(rec.id);
     const st = calcStatus(rec);
     if (st === 'over') toast(`พักเกินเวลา ${fmtDur(rec.durationSec - recLimitSec(rec))} (รวม ${fmtDur(rec.durationSec)})`, 'warn', 6000);
     else toast(`กลับจากพักเรียบร้อย ใช้เวลา ${fmtDur(rec.durationSec)}`);
@@ -867,34 +922,108 @@ const secNow = () => new Date(Math.floor(nowDate().getTime() / 1000) * 1000);
 function deviceName() { try { return localStorage.getItem('sbk_break_device') || ''; } catch (e) { return ''; } }
 
 /* =====================================================================
-   FORM 4) รูปภาพ — บีบอัดฝั่งเครื่อง (≤ 900px, JPEG 0.7) ลด payload ของ Apps Script
+   FORM 4) รูปภาพ — "ถ่ายรูป" เท่านั้น (ไม่รับรูปจากคลัง) + ประทับวันเวลาลงบนภาพ
+   - มือถือ/แท็บเล็ต: เปิดกล้องของเครื่องผ่าน <input capture> (iOS/Android เปิดกล้องตรง ไม่มีตัวเลือกคลังภาพ)
+   - คอมพิวเตอร์: เปิดกล้องในหน้าเว็บ (getUserMedia) — ถ้าใช้ไม่ได้จึงใช้ input สำรอง
+   - กันรูปเก่า: ไฟล์ที่เวลาสร้างห่างจากปัจจุบันเกิน PHOTO_MAX_AGE จะถูกปฏิเสธ
+   - ลายน้ำ: วัน/เดือน/ปี (พ.ศ.) + เวลา (อ้างอิงเวลา server) + ชื่อ/รหัส + ช่วงพัก ฝังลงในภาพก่อนบันทึก
    ===================================================================== */
-function compressImage(file, max = 900, q = 0.7) {
-  return new Promise((res, rej) => {
-    if (!file || !/^image\//.test(file.type)) return rej(new Error('กรุณาเลือกไฟล์รูปภาพเท่านั้น'));
-    const fr = new FileReader(); fr.onerror = () => rej(new Error('อ่านไฟล์รูปไม่สำเร็จ'));
-    fr.onload = () => { const img = new Image(); img.onerror = () => rej(new Error('ไฟล์รูปไม่รองรับ (แนะนำ JPG/PNG)'));
-      img.onload = () => { const sc = Math.min(1, max / Math.max(img.width, img.height)); const c = document.createElement('canvas');
-        c.width = Math.round(img.width * sc); c.height = Math.round(img.height * sc); const x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height); x.drawImage(img, 0, 0, c.width, c.height);
-        res(c.toDataURL('image/jpeg', q)); };
-      img.src = fr.result; };
-    fr.readAsDataURL(file);
+const PHOTO_MAX = 1000, PHOTO_Q = 0.72, PHOTO_MAX_AGE_MS = 3 * 60000;
+const isTouchDevice = () => window.matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window;
+const loadImage = src => new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('อ่านรูปไม่สำเร็จ (ไฟล์อาจเสียหรือเป็นชนิดที่ไม่รองรับ)')); i.src = src; });
+const readAsDataURL = file => new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = () => rej(new Error('อ่านไฟล์รูปไม่สำเร็จ')); fr.readAsDataURL(file); });
+// วาดภาพลง canvas (ย่อ ≤ PHOTO_MAX) + แถบลายน้ำ แล้วคืน dataURL JPEG
+async function stampPhoto(source, sw, sh, target, takenAt) {
+  const sc = Math.min(1, PHOTO_MAX / Math.max(sw, sh));
+  const w = Math.max(1, Math.round(sw * sc)), h = Math.max(1, Math.round(sh * sc));
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const x = c.getContext('2d'); if (!x) throw new Error('เบราว์เซอร์ไม่รองรับการประมวลผลรูปภาพ');
+  x.fillStyle = '#fff'; x.fillRect(0, 0, w, h); x.drawImage(source, 0, 0, w, h);
+  try { await Promise.race([document.fonts.load(`600 20px Sarabun`, 'กขค0123'), sleep(1500)]); } catch (e) {}
+  const emp = state.selEmp || {}, rec = emp.id && activeOf(emp.id);
+  const brk = target === 'end' ? (rec ? rec.breakNo : '') : state.selBreak;
+  const line1 = `${fmtDateBEFull(takenAt)}  เวลา ${fmtTimeS(takenAt.toISOString())} น.`;
+  const line2 = `${emp.name || ''}${emp.id ? ' (' + emp.id + ')' : ''} • ${target === 'end' ? 'กลับจากพัก' : 'เริ่มพัก'}${brk ? ' ช่วงที่ ' + brk : ''} • SBK Break`;
+  const fs = Math.max(13, Math.round(w / 40)), pad = Math.round(fs * 0.6), bh = fs * 2 + pad * 3;
+  const g = x.createLinearGradient(0, h - bh - pad, 0, h); g.addColorStop(0, 'rgba(15,23,42,0)'); g.addColorStop(.35, 'rgba(15,23,42,.72)'); g.addColorStop(1, 'rgba(15,23,42,.88)');
+  x.fillStyle = g; x.fillRect(0, h - bh - pad, w, bh + pad);
+  x.textBaseline = 'alphabetic'; x.shadowColor = 'rgba(0,0,0,.6)'; x.shadowBlur = 3;
+  x.fillStyle = '#fde68a'; x.font = `700 ${Math.round(fs * 1.05)}px Sarabun, sans-serif`; x.fillText(line1, pad, h - pad * 2 - fs, w - pad * 2);
+  x.fillStyle = '#ffffff'; x.font = `500 ${fs}px Sarabun, sans-serif`; x.fillText(line2, pad, h - pad, w - pad * 2);
+  const url = c.toDataURL('image/jpeg', PHOTO_Q);
+  if (!url || url.length < 1000) throw new Error('สร้างรูปไม่สำเร็จ (หน่วยความจำเครื่องอาจไม่พอ)');
+  return url;
+}
+// ไฟล์จากกล้องของมือถือ — ตรวจว่าเป็นรูปที่เพิ่งถ่าย (เวลาไฟล์อ้างอิงนาฬิกาเครื่องเดียวกัน จึงเทียบกับ Date.now())
+async function photoFromFile(file, target) {
+  if (!file) throw new Error('ไม่ได้ถ่ายรูป');
+  if (file.type && !/^image\//.test(file.type)) throw new Error('ไฟล์ที่ได้ไม่ใช่รูปภาพ');
+  if (file.size > 25 * 1048576) throw new Error('ไฟล์รูปใหญ่เกินไป (เกิน 25 MB)');
+  const age = Math.abs(Date.now() - (file.lastModified || Date.now()));
+  if (age > PHOTO_MAX_AGE_MS) throw new Error(`รูปนี้ไม่ได้ถ่าย ณ ขณะนี้ (ไฟล์สร้างเมื่อ ${fmtDateBE(new Date(file.lastModified), true)} ${fmtTime(new Date(file.lastModified).toISOString())} น.) กรุณากดถ่ายรูปใหม่`);
+  const img = await loadImage(await readAsDataURL(file));
+  if (!img.width || !img.height) throw new Error('รูปภาพไม่มีขนาด (ไฟล์อาจเสีย)');
+  const takenAt = secNow();
+  return { url: await stampPhoto(img, img.width, img.height, target, takenAt), at: takenAt.toISOString() };
+}
+// กล้องในหน้าเว็บ (คอมพิวเตอร์) — คืน Promise<{url, at}> หรือ null ถ้าผู้ใช้ยกเลิก
+let camStream = null, camFacing = 'environment';
+function stopCam() { try { camStream && camStream.getTracks().forEach(t => t.stop()); } catch (e) {} camStream = null; }
+async function startCam() {
+  stopCam();
+  camStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: camFacing, width: { ideal: 1280 }, height: { ideal: 960 } }, audio: false });
+  const v = $('#camVideo'); v.srcObject = camStream; await v.play();
+}
+function camErrorText(e) {
+  const n = e && e.name;
+  if (n === 'NotAllowedError' || n === 'SecurityError') return 'ไม่ได้รับอนุญาตให้ใช้กล้อง — กรุณากดอนุญาต (Allow) กล้องในเบราว์เซอร์';
+  if (n === 'NotFoundError' || n === 'OverconstrainedError') return 'ไม่พบกล้องในเครื่องนี้';
+  if (n === 'NotReadableError') return 'กล้องถูกใช้งานโดยโปรแกรมอื่นอยู่ กรุณาปิดโปรแกรมนั้นก่อน';
+  return 'เปิดกล้องไม่สำเร็จ: ' + ((e && e.message) || 'ไม่ทราบสาเหตุ');
+}
+function shootWithWebcam(target) {
+  return new Promise(async (resolve, reject) => {
+    const modal = $('#camModal'); const close = v => { stopCam(); modal.classList.add('hidden'); $('#camShot').onclick = $('#camCancel').onclick = $('#camFlip').onclick = null; v instanceof Error ? reject(v) : resolve(v); };
+    modal.classList.remove('hidden'); $('#camHint').textContent = 'กำลังเปิดกล้อง...';
+    try { await startCam(); $('#camHint').textContent = 'จัดภาพให้เห็นหน้างาน/สถานที่พัก แล้วกด "ถ่ายรูป"'; }
+    catch (e) { return close(Object.assign(new Error(camErrorText(e)), { camFail: true })); }
+    $('#camCancel').onclick = () => close(null);
+    $('#camFlip').onclick = async () => { camFacing = camFacing === 'environment' ? 'user' : 'environment'; try { await startCam(); } catch (e) { toast(camErrorText(e), 'err'); } };
+    $('#camShot').onclick = async () => {
+      const v = $('#camVideo');
+      if (!v.videoWidth) return toast('กล้องยังไม่พร้อม กรุณารอสักครู่', 'warn');
+      try { const takenAt = secNow(); close({ url: await stampPhoto(v, v.videoWidth, v.videoHeight, target, takenAt), at: takenAt.toISOString() }); }
+      catch (e) { close(e); }
+    };
   });
 }
-function renderPhotoBox(box) {
-  const t = box.dataset.target, src = state.photos[t];
-  box.innerHTML = src
-    ? `<div class="relative inline-block fade-in"><img src="${src}" class="h-40 rounded-2xl ring-4 ring-white dark:ring-slate-800 shadow-xl object-cover cursor-zoom-in" data-zoom alt="รูปแนบ"><button class="absolute -top-2 -right-2 bg-gradient-to-br from-rose-500 to-red-600 text-white w-8 h-8 rounded-full text-sm shadow-lg" data-rm>✕</button><span class="absolute bottom-2 left-2 chip chip-ok">✓ แนบแล้ว</span></div>`
-    : `<div class="grid grid-cols-2 gap-3">
-        <label class="photo-drop cursor-pointer flex flex-col items-center justify-center gap-1 py-4 font-semibold text-indigo-700 dark:text-indigo-200"><span class="text-2xl">📷</span>ถ่ายรูป<input type="file" accept="image/*" capture="environment" class="hidden" data-file></label>
-        <label class="photo-drop cursor-pointer flex flex-col items-center justify-center gap-1 py-4 font-semibold text-violet-700 dark:text-violet-200"><span class="text-2xl">🖼️</span>เลือกจากคลัง<input type="file" accept="image/*" class="hidden" data-file></label></div>`;
-  $$('[data-file]', box).forEach(inp => inp.onchange = async () => {
-    const f = inp.files[0]; if (!f) return;
-    box.innerHTML = `<div class="flex items-center gap-2 text-sm text-slate-500 py-4"><span class="spinner"></span> กำลังบีบอัดรูปภาพ...</div>`;
-    try { state.photos[t] = await compressImage(f); toast('แนบรูปภาพเรียบร้อย'); } catch (e) { toast(e.message, 'err'); }
+// จุดเดียวสำหรับ "ถ่ายรูป": เลือกวิธีตามอุปกรณ์ + จัดการ error ครบทุกกรณี
+async function takePhoto(box) {
+  const t = box.dataset.target;
+  if (!state.selEmp) return toast('กรุณาเลือกพนักงานก่อนถ่ายรูป', 'warn');
+  const useNative = isTouchDevice() || !(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+  if (!useNative) {
+    try { const r = await shootWithWebcam(t); if (r) { setPhoto(t, r); } return renderPhotoBox(box); }
+    catch (e) { toast(e.message, 'err', 6000); if (!e.camFail) return renderPhotoBox(box); /* กล้องเว็บใช้ไม่ได้ → ใช้ input สำรอง */ }
+  }
+  const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*'; inp.setAttribute('capture', 'environment');
+  inp.onchange = async () => {
+    const f = inp.files && inp.files[0]; if (!f) return;
+    box.innerHTML = `<div class="flex items-center gap-2 text-sm text-slate-500 py-4"><span class="spinner"></span> กำลังประมวลผลรูปภาพ...</div>`;
+    try { setPhoto(t, await photoFromFile(f, t)); } catch (e) { toast(e.message, 'err', 7000); }
     renderPhotoBox(box);
-  });
-  const rm = $('[data-rm]', box); if (rm) rm.onclick = () => { state.photos[t] = null; renderPhotoBox(box); };
+  };
+  inp.click();
+}
+function setPhoto(t, r) { state.photos[t] = r.url; state.photoAt[t] = r.at; toast(`ถ่ายรูปเรียบร้อย (${fmtTimeS(r.at)} น.)`); }
+function renderPhotoBox(box) {
+  const t = box.dataset.target, src = state.photos[t], at = state.photoAt[t];
+  box.innerHTML = src
+    ? `<div class="relative inline-block fade-in"><img src="${src}" class="h-44 rounded-2xl ring-4 ring-white dark:ring-slate-800 shadow-xl object-cover cursor-zoom-in" data-zoom alt="รูปแนบ"><button class="absolute -top-2 -right-2 bg-gradient-to-br from-rose-500 to-red-600 text-white w-8 h-8 rounded-full text-sm shadow-lg" data-rm aria-label="ลบรูป">✕</button></div>
+       <div class="mt-2 flex flex-wrap items-center gap-2"><span class="chip chip-ok">📷 ถ่ายเมื่อ ${at ? fmtDateBE(new Date(at), true) + ' ' + fmtTimeS(at) + ' น.' : '-'}</span><button class="btn btn-ghost !py-1 !px-3 text-xs" data-retake>🔄 ถ่ายใหม่</button></div>`
+    : `<button type="button" class="photo-drop w-full cursor-pointer flex flex-col items-center justify-center gap-1 py-5 font-semibold text-indigo-700 dark:text-indigo-200" data-take><span class="text-3xl">📷</span>ถ่ายรูป<span class="text-xs font-normal text-slate-500 dark:text-slate-400">ระบบประทับวันที่และเวลาลงบนภาพอัตโนมัติ</span></button>`;
+  const tk = $('[data-take]', box) || $('[data-retake]', box); if (tk) tk.onclick = () => takePhoto(box);
+  const rm = $('[data-rm]', box); if (rm) rm.onclick = () => { state.photos[t] = null; state.photoAt[t] = null; renderPhotoBox(box); };
   const z = $('[data-zoom]', box); if (z) z.onclick = () => openLightbox(src);
 }
 
@@ -909,11 +1038,9 @@ function renderCombo(q = '') {
   const list = $('#empList'), s = q.trim().toLowerCase();
   const items = state.employees.filter(e => !s || e.id.includes(s) || e.name.toLowerCase().includes(s) || e.position.toLowerCase().includes(s)).slice(0, 60);
   list.innerHTML = items.length ? items.map((e, i) => {
-    const act = activeOf(e.id), n = shiftOf(e.id).length;
-    const badge = act ? `<span class="chip chip-active">กำลังพัก</span>` : n >= 2 ? `<span class="chip chip-ok">ครบ 2 ช่วง</span>` : n === 1 ? `<span class="chip bg-sky-100 text-sky-800 dark:bg-sky-900 dark:text-sky-200">พักแล้ว 1</span>` : '';
     return `<button type="button" class="combo-item w-full text-left px-3 py-2.5 flex items-center gap-3 hover:bg-slate-50 dark:hover:bg-slate-800 ${i === comboIdx ? 'hl' : ''}" data-id="${esc(e.id)}">
       <span class="av !w-10 !h-10 text-sm" style="${avStyle(e.id)}">${esc(initial(e.name))}</span>
-      <span class="min-w-0 flex-1"><span class="block font-semibold truncate">${esc(e.name)}</span><span class="block text-xs text-slate-500">${esc(e.id)} • ${esc(e.position)}</span></span>${badge}</button>`;
+      <span class="min-w-0 flex-1"><span class="block font-semibold truncate">${esc(e.name)}</span><span class="block text-xs text-slate-500">${esc(e.id)} • ${esc(e.position)}</span></span></button>`;
   }).join('') : `<div class="p-4 text-sm text-slate-500 text-center">ไม่พบรายชื่อ "${esc(q)}"<br><span class="text-xs">เพิ่มรายชื่อได้ที่แอปแดชบอร์ด → จัดการพนักงาน</span></div>`;
   list.classList.remove('hidden'); $('#empSearch').setAttribute('aria-expanded', 'true');
   $$('.combo-item', list).forEach(b => b.onmousedown = ev => { ev.preventDefault(); selectEmployee(b.dataset.id); });
@@ -927,7 +1054,10 @@ function selectEmployee(id, silent = false) {
   if (!silent || document.activeElement !== $('#empSearch')) $('#empSearch').value = `${emp.id} - ${emp.name}`;
   $('#empClear').classList.remove('hidden');
   const shift = shiftOf(emp.id), act = activeOf(emp.id), b = n => shift.find(r => r.breakNo === n);
+  // แสดงสถานะเฉพาะ "วันนี้" — รายการของเมื่อวานไม่แสดง แต่ถ้ายังอยู่ใน 16 ชม. (กะต่อเนื่อง) จะบอกเหตุผลที่ช่วงนั้นถูกล็อก
+  const tk = dateKey(nowDate());
   const stat = n => { const r = b(n); if (!r) return `<span class="text-slate-400">ยังไม่พัก</span>`;
+    if (r.date !== tk && r.end) return `<span class="text-xs text-slate-500" title="กติกา: ใช้ช่วงเดิมซ้ำได้หลัง ${CONFIG.DUP_WINDOW_H} ชม.">ใช้สิทธิ์ในกะก่อน (เมื่อวาน ${fmtTime(r.start)} น.)</span>`;
     if (!r.end) return `<span class="chip chip-active">กำลังพัก ${fmtTime(r.start)}</span>`;
     const s = calcStatus(r); return `<button class="chip ${STATUS_CHIP[s]}" data-slip="${r.id}">${fmtTime(r.start)}–${fmtTime(r.end)} • ${fmtMin(r.durationSec)} น. 🧾</button>`; };
   $('#empCard').innerHTML = `
@@ -951,12 +1081,12 @@ function selectEmployee(id, silent = false) {
     $('#startPanel').classList.remove('hidden');
     if (!silent || !state.selBreak || b(state.selBreak)) state.selBreak = b(1) ? 2 : 1; // เลือกช่วงถัดไปให้อัตโนมัติ
     $$('#breakSeg .seg-btn').forEach(btn => { const n = +btn.dataset.break, used = !!b(n);
-      btn.disabled = used; btn.classList.toggle('sel', state.selBreak === n); $('[data-sub]', btn).textContent = used ? 'ใช้สิทธิ์แล้วในกะนี้' : `Break ${n}`; });
+      btn.disabled = used; btn.classList.toggle('sel', state.selBreak === n); $('[data-sub]', btn).textContent = !used ? `Break ${n}` : (b(n).date === tk ? 'ใช้สิทธิ์แล้ววันนี้' : `ใช้ไปในกะก่อน (${fmtTime(b(n).start)} น.)`); });
     if (!silent) renderPhotoBox($('.photo-box[data-target="start"]'));
   }
 }
 function clearEmployee() {
-  state.selEmp = null; state.selBreak = null; state.photos = { start: null, end: null };
+  state.selEmp = null; state.selBreak = null; state.photos = { start: null, end: null }; state.photoAt = { start: null, end: null };
   $('#empSearch').value = ''; $('#empClear').classList.add('hidden'); $('#empCard').classList.add('hidden'); hideCombo();
   ['startPanel', 'activePanel', 'donePanel'].forEach(p => $('#' + p).classList.add('hidden'));
 }
@@ -1044,13 +1174,13 @@ function handleEvents() {
   document.addEventListener('visibilitychange', () => { if (!document.hidden) { pull(); retryPending(); } });
   window.addEventListener('online', () => { toast('กลับมาออนไลน์แล้ว กำลังซิงก์ข้อมูล', 'info'); retryPending(); pull(true); });
   // เมื่อขึ้นหน้าพักหน้าจอ → ล้างพนักงานที่เลือกไว้ เพื่อให้คนถัดไปเริ่มใหม่ (เครื่องใช้ร่วมกันที่จุดรปภ.)
-  document.addEventListener('splash:show', e => { if (e.detail === 'idle') { clearEmployee(); $('#slipModal').classList.add('hidden'); } });
+  document.addEventListener('splash:show', e => { if (e.detail === 'idle') { clearEmployee(); $('#slipModal').classList.add('hidden'); if (!$('#camModal').classList.contains('hidden')) $('#camCancel').click(); } });
 }
 async function init() {
   $$('[data-limit]').forEach(x => x.textContent = CONFIG.LIMIT_MIN);
   Splash.init({ info: mode => { const n = live().filter(r => !r.end && calcStatus(r) === 'active').length;
     return mode === 'idle' ? (n ? `ขณะนี้มีพนักงานกำลังพัก ${n} คน` : 'ไม่มีพนักงานกำลังพักอยู่') : 'ระบบลงเวลาพักพนักงาน • ช่วงละไม่เกิน ' + CONFIG.LIMIT_MIN + ' นาที'; } });
-  handleEvents();
+  handleEvents(); checkTimezone();
   if (!(await DB.open())) toast('เบราว์เซอร์นี้เก็บข้อมูลถาวรไม่ได้ (อาจเป็นโหมดไม่ระบุตัวตน)', 'warn', 7000);
   try {
     const all = (await DB.all()) || [];
@@ -1062,15 +1192,15 @@ async function init() {
   live().filter(r => !r.end && elapsedSec(r) > recLimitSec(r)).forEach(r => state.overAlerted.add(r.id));
   renderAll(); renderPending();
 
-  const tick = () => {
+  const tick = () => { try {
     const n = nowDate(); $('#hdrClock').textContent = `${fmtDateBEFull(n)} • ${fmtTimeS(n.toISOString())} น.`;
     $('#heroTime').textContent = fmtTimeS(n.toISOString()); $('#heroDate').textContent = fmtDateBEFull(n);
     tickActive(); checkOvertimeAlerts();
     $$('[data-live]').forEach(el => { const r = state.records.find(x => x.id === el.dataset.live); if (!r) return; el.textContent = fmtClock(elapsedSec(r));
       const bar = el.closest('button')?.querySelector('[data-bar]'); if (bar) bar.style.width = Math.min(100, elapsedSec(r) / recLimitSec(r) * 100).toFixed(1) + '%'; });
     const over = live().filter(r => !r.end && elapsedSec(r) > recLimitSec(r)).length;
-    if (over !== tick.last) { tick.last = over; renderActiveList(); }
-  };
+    if (over !== tick.last) { tick.last = over; renderActiveList(); renderHero(); }
+  } catch (e) { logError('tick', e); } }; // ห้าม error ในตัวจับเวลาทำให้หน้าจอหยุดนิ่ง
   tick(); setInterval(tick, 1000);
   setInterval(() => { if (!document.hidden) pull(); }, 20000);
   setInterval(() => { if (!document.hidden) retryPending(); }, 45000);
