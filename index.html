@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <!--
-  SBK_Break_Form_v8.html — แอปฟอร์มแจ้งพักพนักงาน (v8)
+  SBK_Break_Form_v9.html — แอปฟอร์มแจ้งพักพนักงาน (v9)
+  v9: สลิปก่อนพัก/หลังพักขนาดเท่ากัน (ช่องรูป 2 ช่องสูงคงที่ + หมายเหตุแสดงเสมอ) • บันทึกสลิป: เลือกโฟลเดอร์ได้ (คอมพิวเตอร์), ดาวน์โหลดอัตโนมัติ (มือถือ), ปุ่มบันทึกลงอัลบั้มรูปผ่านเมนูแชร์ • ใช้คู่กับ Code_Break_v4.gs เดิม
   v8: แก้ "รูปแนบไม่ติดบนรูปสลิป" (รูปจาก Google Drive ถูกบล็อก CORS ตอนสร้างรูป → ตอนนี้แปลงเป็น data URL ก่อน capture, ดึงรูปไม่ได้จะแจ้งเตือนแทนกรอบว่าง) • ตัดปุ่มส่งเข้า LINE ออก → เหลือ "บันทึกสลิปลงเครื่อง" แล้วส่งต่อเอง • ต้องใช้คู่กับ Code_Break_v4.gs
   v7: แนบรูปได้เฉพาะ "ถ่ายรูป" (ตัดเลือกจากคลัง) + ประทับวันเวลาลงภาพ, กันรูปเก่า, กล้องในหน้าเว็บสำหรับคอมพิวเตอร์,
       Error handling กลาง, กันเวลากลับก่อนเวลาเริ่ม, กันรายการค้าง >24 ชม., รวมข้อมูลจาก server เมื่อกดกลับซ้อนจาก 2 เครื่อง
@@ -365,8 +366,11 @@
     <div class="w-full max-w-md">
       <div class="flex justify-center"><div id="slipWrap" class="rounded-2xl overflow-hidden shadow-2xl"></div></div>
       <div class="card p-3 mt-3 grid grid-cols-2 gap-2">
-        <button id="slipSaveImg" class="btn btn-brand col-span-2 !py-3">💾 บันทึกสลิปลงเครื่อง</button>
-        <div class="col-span-2 text-center text-xs text-slate-500 dark:text-slate-400">บันทึกเป็นรูป .jpg ลงเครื่อง แล้วนำไปส่งต่อเองได้ทุกช่องทาง</div>
+        <button id="slipSaveImg" class="btn btn-brand col-span-2 !py-3">💾 บันทึกสลิปลงเครื่อง (JPG)</button>
+        <button id="slipShareAlbum" class="btn btn-ghost col-span-2 text-sm hidden">📷 บันทึกลงอัลบั้มรูป (เลือก “บันทึกรูปภาพ”)</button>
+        <button id="slipPickDir" class="btn btn-ghost col-span-2 text-sm hidden">📁 เลือกโฟลเดอร์เก็บสลิป</button>
+        <label id="slipAutoWrap" class="col-span-2 flex items-center justify-center gap-2 text-xs text-slate-600 dark:text-slate-300"><input id="slipAuto" type="checkbox" class="accent-emerald-600"> บันทึกสลิปอัตโนมัติเมื่อกดกลับจากพัก</label>
+        <div id="slipSaveHint" class="col-span-2 text-center text-xs text-slate-500 dark:text-slate-400">บันทึกเป็นรูป .jpg ลงเครื่อง แล้วนำไปส่งต่อเองได้ทุกช่องทาง</div>
         <button id="slipClose" class="btn btn-ghost col-span-2 text-sm">ปิด</button>
       </div>
     </div>
@@ -701,7 +705,10 @@ function slipHTML(r) {
   const head = { over: '#dc2626', active: '#d97706', forgot: '#7c3aed', ontime: '#059669' }[st];
   const icon = { over: '⚠️', active: '⏳', forgot: '❓', ontime: '✅' }[st];
   const dur = r.end ? fmtDur(r.durationSec) : `${fmtDur(elapsedSec(r))} (ยังไม่กลับ)`;
-  const ph = [['เริ่มพัก' + (r.photoStartAt ? ' • ' + fmtTimeS(r.photoStartAt) : ''), photoOf(r, 'Start'), 'Start'], ['กลับจากพัก' + (r.photoEndAt ? ' • ' + fmtTimeS(r.photoEndAt) : ''), photoOf(r, 'End'), 'End']].filter(x => x[1]);
+  // v9: ช่องรูปมี 2 ช่องเสมอ (เริ่มพัก/กลับจากพัก) สูงคงที่ → สลิปก่อนพักกับหลังพักได้ขนาดเท่ากัน
+  const ph = [['Start', 'เริ่มพัก' + (r.photoStartAt ? ' • ' + fmtTimeS(r.photoStartAt) : ''), photoOf(r, 'Start'), 'ไม่มีรูปแนบ'],
+              ['End', 'กลับจากพัก' + (r.photoEndAt ? ' • ' + fmtTimeS(r.photoEndAt) : ''), photoOf(r, 'End'), r.end ? 'ไม่มีรูปแนบ' : 'ยังไม่กลับจากพัก']];
+  const PH_H = 150, PH_BOX = 'width:100%;height:' + PH_H + 'px;border-radius:10px;border:1px solid #e2e8f0;box-sizing:border-box';
   const row = (k, v, c) => `<div style="display:flex;justify-content:space-between;gap:12px;padding:5px 0;border-bottom:1px dashed #e2e8f0;font-size:14px"><span style="color:#64748b">${k}</span><span style="font-weight:600;text-align:right;${c ? 'color:' + c : ''}">${v}</span></div>`;
   return `<div id="slipCard" style="width:360px;background:#fff;color:#0f172a;font-family:Sarabun,sans-serif;line-height:1.6">
     <div style="background:${head};color:#fff;padding:16px 18px 14px">
@@ -721,9 +728,12 @@ function slipHTML(r) {
       ${row('เวลากลับจากพัก', r.end ? fmtTimeS(r.end) + ' น.' : '—')}
       ${row('ระยะเวลาพัก', dur, head)}
       ${row('เกณฑ์ที่กำหนด', `ไม่เกิน ${Number(r.limitMin) || CONFIG.LIMIT_MIN} นาที`)}
-      ${r.note ? row('หมายเหตุ', esc(r.note)) : ''}
+      ${row('หมายเหตุ', esc(r.note || '-'))}
       ${r.closedBy ? row('ปิดรายการโดย', esc(r.closedBy)) : ''}
-      ${ph.length ? `<div style="display:grid;grid-template-columns:repeat(${ph.length},1fr);gap:8px;margin-top:10px">${ph.map(([l, s, w]) => `<div><img src="${esc(s)}" data-ph="${w}" referrerpolicy="no-referrer" style="width:100%;height:${ph.length > 1 ? 120 : 190}px;object-fit:cover;border-radius:10px;border:1px solid #e2e8f0;cursor:zoom-in" data-zoom><div style="font-size:11px;color:#64748b;text-align:center;margin-top:2px">${l}</div></div>`).join('')}</div>` : ''}
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px">${ph.map(([w, l, s, empty]) => `<div>${s
+        ? `<img src="${esc(s)}" data-ph="${w}" referrerpolicy="no-referrer" style="${PH_BOX};display:block;object-fit:cover;cursor:zoom-in" data-zoom>`
+        : `<div style="${PH_BOX};display:flex;align-items:center;justify-content:center;background:#f8fafc;border-style:dashed;color:#94a3b8;font-size:12px;text-align:center;padding:6px">${empty}</div>`
+      }<div style="font-size:11px;color:#64748b;text-align:center;margin-top:2px;min-height:18px">${l}</div></div>`).join('')}</div>
       <div style="text-align:center;font-size:11px;color:#94a3b8;margin:12px 0 4px">ออกโดยระบบแจ้งพักพนักงาน • ${CONFIG.ORG}<br>พิมพ์เมื่อ ${fmtDateBE(nowDate(), true)} ${fmtTimeS(nowDate().toISOString())} น.</div>
     </div>
     <div style="height:12px;background:radial-gradient(circle at 6px 0, transparent 6px, #fff 6.5px) repeat-x;background-size:12px 12px;background-color:#f1f5f9"></div>
@@ -793,21 +803,84 @@ async function slipBlob() {
   return new Promise(res => c.toBlob(res, 'image/jpeg', 0.92));
 }
 const slipFileName = r => `Slip_${r.empId}_${r.date}_B${r.breakNo}.jpg`;
-// v8: ตัดการส่งเข้า LINE ออก → บันทึกรูปสลิปลงเครื่อง แล้วผู้ใช้นำไปส่งต่อเองทางช่องทางที่ต้องการ
+// ---------- บันทึกสลิปลงเครื่อง (v9) ----------
+// เบราว์เซอร์ไม่อนุญาตให้เว็บเขียนลงอัลบั้มรูป/โฟลเดอร์ใดก็ได้เอง จึงมี 3 ทาง:
+//  1) คอมพิวเตอร์ (Chrome/Edge): เลือกโฟลเดอร์ครั้งเดียว → ระบบเขียนไฟล์ลงโฟลเดอร์นั้นเองทุกครั้ง (เงียบ)
+//  2) มือถือ/ทั่วไป: ดาวน์โหลด .jpg ลงโฟลเดอร์ดาวน์โหลดของเครื่องอัตโนมัติ (Android จะเห็นในแกลเลอรี่)
+//  3) ปุ่ม "บันทึกลงอัลบั้มรูป": เปิดเมนูแชร์ของเครื่อง แล้วเลือก “บันทึกรูปภาพ” (iPhone เข้า Photos / Android เลือกแกลเลอรี่)
+const _lsGet = k => { try { return localStorage.getItem(k); } catch (e) { return null; } };
+const _lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* ไม่เป็นไร */ } };
+const slipAutoOn = () => _lsGet('sbk_slip_auto') !== '0'; // ค่าเริ่มต้น = เปิด
+function _prefDb() { return new Promise((res, rej) => { const q = indexedDB.open('sbk_break_prefs', 1); q.onupgradeneeded = () => q.result.createObjectStore('kv'); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); }
+async function prefGet(k) { const db = await _prefDb(); return new Promise((res, rej) => { const r = db.transaction('kv').objectStore('kv').get(k); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }); }
+async function prefSet(k, v) { const db = await _prefDb(); return new Promise((res, rej) => { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = () => res(); t.onerror = () => rej(t.error); }); }
+const canPickDir = () => typeof window.showDirectoryPicker === 'function';
+const canShareFile = () => { try { return !!(navigator.canShare && navigator.canShare({ files: [new File(['x'], 'a.jpg', { type: 'image/jpeg' })] })); } catch (e) { return false; } };
+
+async function slipDirHandle(allowPrompt) { // คืน handle ของโฟลเดอร์ที่เลือกไว้ ถ้ายังมีสิทธิ์เขียน
+  if (!canPickDir()) return null;
+  try {
+    const h = await prefGet('slipDir'); if (!h) return null;
+    let p = await h.queryPermission({ mode: 'readwrite' });
+    if (p !== 'granted' && allowPrompt) p = await h.requestPermission({ mode: 'readwrite' }); // ต้องเรียกจากการกดปุ่มเท่านั้น
+    return p === 'granted' ? h : null;
+  } catch (e) { logError('slip.dir', e); return null; }
+}
+async function writeSlipToDir(h, blob, name) {
+  const fh = await h.getFileHandle(name, { create: true }), w = await fh.createWritable();
+  await w.write(blob); await w.close();
+}
+async function updateDirUI() {
+  const b = $('#slipPickDir'); if (!b || !canPickDir()) return;
+  b.classList.remove('hidden'); let h = null; try { h = await prefGet('slipDir'); } catch (e) { /* ยังไม่เคยเลือก */ }
+  b.textContent = h ? `📁 โฟลเดอร์เก็บสลิป: ${h.name} (กดเพื่อเปลี่ยน)` : '📁 เลือกโฟลเดอร์เก็บสลิป (บันทึกอัตโนมัติลงโฟลเดอร์นี้)';
+}
+async function pickSlipDir() {
+  try { const h = await window.showDirectoryPicker({ mode: 'readwrite', id: 'sbkslips' }); await prefSet('slipDir', h); toast('เลือกโฟลเดอร์แล้ว: ' + h.name + ' — สลิปจะถูกบันทึกลงที่นี่', 'ok', 5000); updateDirUI(); }
+  catch (e) { if (e && e.name !== 'AbortError') toast('เลือกโฟลเดอร์ไม่สำเร็จ: ' + e.message, 'err', 5000); }
+}
+// บันทึกสลิป 1 ใบ: โฟลเดอร์ที่เลือก → ถ้าไม่มี/ไม่ได้ ใช้ดาวน์โหลด
+async function saveSlipFile(r, auto) {
+  const name = slipFileName(r);
+  const dir = await slipDirHandle(!auto); // ทำก่อน capture เพื่อให้ยังอยู่ในจังหวะที่ผู้ใช้เพิ่งกดปุ่ม
+  const blob = await slipBlob(); if (!blob) throw new Error('สร้างไฟล์รูปไม่สำเร็จ');
+  if (dir) { try { await writeSlipToDir(dir, blob, name); return { via: 'dir', name, folder: dir.name }; } catch (e) { logError('slip.dir.write', e); } }
+  downloadBlob(blob, name); return { via: 'download', name };
+}
+const _savedMsg = s => s.via === 'dir' ? `บันทึกสลิปลงโฟลเดอร์ “${s.folder}” แล้ว (${s.name})` : `บันทึกสลิปลงเครื่องแล้ว (${s.name}) — ดูในโฟลเดอร์ดาวน์โหลด/แกลเลอรี่`;
 async function saveSlipImage(btn) {
+  if (!slipRec) return;
+  setBusy(btn, true, 'กำลังสร้างรูปสลิป...');
+  try { toast(_savedMsg(await saveSlipFile(slipRec, false)), 'ok', 6000); }
+  catch (e) { toast('บันทึกรูปไม่สำเร็จ: ' + e.message, 'err', 6000); } finally { setBusy(btn, false); }
+}
+async function shareSlipAlbum(btn) {
   if (!slipRec) return;
   setBusy(btn, true, 'กำลังสร้างรูปสลิป...');
   try {
     const blob = await slipBlob(); if (!blob) throw new Error('สร้างไฟล์รูปไม่สำเร็จ');
-    downloadBlob(blob, slipFileName(slipRec));
-    toast('บันทึกสลิปลงเครื่องแล้ว (' + slipFileName(slipRec) + ') — นำไปส่งต่อเองได้เลย', 'ok', 6000);
-  } catch (e) { toast('บันทึกรูปไม่สำเร็จ: ' + e.message, 'err', 6000); } finally { setBusy(btn, false); }
+    const file = new File([blob], slipFileName(slipRec), { type: 'image/jpeg' });
+    await navigator.share({ files: [file], title: 'สลิปแจ้งพัก' });
+  } catch (e) { if (!e || e.name !== 'AbortError') toast('เปิดเมนูบันทึกไม่สำเร็จ: ' + (e && e.message || e), 'err', 6000); } finally { setBusy(btn, false); }
+}
+const _autoSaved = new Set();
+async function autoSaveSlip(rec) { // เรียกหลังกด "กลับจากพัก" (ใช้ในฟอร์ม)
+  if (!slipAutoOn() || !rec || _autoSaved.has(rec.id)) return;
+  _autoSaved.add(rec.id);
+  try {
+    await slipReady; if (slipRec !== rec) return; // ผู้ใช้เปิดสลิปใบอื่นไปแล้ว
+    toast(_savedMsg(await saveSlipFile(rec, true)), 'ok', 6000);
+  } catch (e) { _autoSaved.delete(rec.id); toast('บันทึกอัตโนมัติไม่สำเร็จ — กดปุ่ม “บันทึกสลิปลงเครื่อง” เองได้เลย', 'warn', 7000); }
 }
 function bindCommonUI() {
   $('#btnTheme') && ($('#btnTheme').onclick = () => { toggleTheme(); document.dispatchEvent(new Event('theme:change')); });
   $('#slipClose').onclick = () => $('#slipModal').classList.add('hidden');
   $('#slipModal').onclick = e => { if (e.target === e.currentTarget || e.target.parentElement === e.currentTarget) $('#slipModal').classList.add('hidden'); };
   $('#slipSaveImg').onclick = e => saveSlipImage(e.currentTarget);
+  $('#slipPickDir').onclick = pickSlipDir; updateDirUI();
+  if (canShareFile()) { const sb = $('#slipShareAlbum'); sb.classList.remove('hidden'); sb.onclick = e => shareSlipAlbum(e.currentTarget); }
+  const au = $('#slipAuto'); au.checked = slipAutoOn(); au.onchange = () => _lsSet('sbk_slip_auto', au.checked ? '1' : '0');
+  if (typeof endBreak !== 'function') $('#slipAutoWrap').classList.add('hidden'); // แดชบอร์ดไม่มีขั้นตอนกดกลับจากพัก
   $('#lightbox').onclick = () => $('#lightbox').classList.add('hidden');
   document.addEventListener('keydown', e => { if (e.key === 'Escape') { $('#lightbox').classList.add('hidden'); $('#slipModal').classList.add('hidden'); } });
 }
@@ -947,7 +1020,7 @@ async function endBreak() {
     const st = calcStatus(rec);
     if (st === 'over') toast(`พักเกินเวลา ${fmtDur(rec.durationSec - recLimitSec(rec))} (รวม ${fmtDur(rec.durationSec)})`, 'warn', 6000);
     else toast(`กลับจากพักเรียบร้อย ใช้เวลา ${fmtDur(rec.durationSec)}`);
-    renderAll(); selectEmployee(emp.id); renderPending(); openSlip(rec);
+    renderAll(); selectEmployee(emp.id); renderPending(); openSlip(rec); autoSaveSlip(slipRec);
     syncRecord(rec, !rec.everSynced);
   } catch (e) { toast('บันทึกไม่สำเร็จ: ' + e.message, 'err', 5000); }
   finally { setBusy(btn, false); }
