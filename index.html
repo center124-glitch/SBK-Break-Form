@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <!--
-  SBK_Break_Form_v9.html — แอปฟอร์มแจ้งพักพนักงาน (v9)
+  SBK_Break_Form_v10.html — แอปฟอร์มแจ้งพักพนักงาน (v10)
+  v10: ไม่แสดงรายการค้างข้ามกะ (> 16 ชม.) + ดึงข้อมูลย้อนให้ครอบคลุมรายการค้างเก่า + รับการแก้ไขในชีตโดยตรง + ลบข้อมูลที่ server ไม่มีแล้ว
   v9: บังคับถ่ายรูปยืนยันทั้งตอนเริ่มพักและกลับจากพัก (รูปผูกกับพนักงาน+ช่วงพัก และต้องถ่ายภายใน 10 นาทีก่อนบันทึก)
   v8: สลิปแสดง/บันทึกรูปแนบครบเสมอ แม้รูปอยู่บน Google Drive (โหลดผ่าน Apps Script) และแจ้งเตือนถ้ารูปโหลดไม่สำเร็จ
   v7: แนบรูปได้เฉพาะ "ถ่ายรูป" (ตัดเลือกจากคลัง) + ประทับวันเวลาลงภาพ, กันรูปเก่า, กล้องในหน้าเว็บสำหรับคอมพิวเตอร์,
@@ -846,7 +847,11 @@ const DB = {
 };
 const live = () => state.records.filter(r => !r.deleted);
 const empById = id => state.employees.find(e => e.id === String(id));
-const activeOf = empId => live().find(r => r.empId === String(empId) && !r.end);
+// รายการเปิดค้างที่เริ่มก่อนกะปัจจุบัน (> 16 ชม.) ไม่ใช่ "กำลังพัก" แล้ว — ไม่แสดงในฟอร์ม ไม่บล็อกการพักใหม่
+// (หัวหน้าเห็นและปิดได้ที่แดชบอร์ดในกล่อง "ลืมกดกลับ") → หน้าฟอร์มแสดงเฉพาะกะปัจจุบันเท่านั้น
+const isStaleOpen = r => !r.end && nowDate() - new Date(r.start) > CONFIG.DUP_WINDOW_H * 3600000;
+const openNow = () => live().filter(r => !r.end && !isStaleOpen(r));
+const activeOf = empId => openNow().find(r => r.empId === String(empId));
 // "กะปัจจุบัน" = รายการที่เริ่มภายใน 16 ชม.ที่ผ่านมา — แทน "วันนี้" เพื่อไม่ให้กะดึกข้ามเที่ยงคืนพักซ้ำช่วงเดิมได้
 const shiftOf = empId => { const lim = nowDate() - CONFIG.DUP_WINDOW_H * 3600000; return live().filter(r => r.empId === String(empId) && new Date(r.start) >= lim); };
 
@@ -893,22 +898,36 @@ async function doSync(rec, isNew) {
   renderPending(); renderAll(); if (state.selEmp) selectEmployee(state.selEmp.id, true);
 }
 function retryPending() { state.records.filter(r => r.sync === 'pending').forEach(r => syncRecord(r, !r.everSynced)); }
+// ลายเซ็นของฟิลด์ที่มีผลต่อการแสดงผล — ใช้ตัดสินว่าข้อมูลจาก server ต่างจากในเครื่องหรือไม่
+const recSig = r => [r.updatedAt, r.start, r.end || '', r.breakNo, r.empId, r.name, r.closedBy || '', r.note || '', r.limitMin, r.photoStartUrl || '', r.photoEndUrl || ''].join('|');
 async function pull(force = false) {
   if (state.pulling || (!force && Date.now() - state.lastPull < 5000)) return;
   state.pulling = true;
   try {
     const t = nowDate();
-    const data = await jsonp({ action: 'list', from: dateKey(addDays(t, -1)), to: dateKey(addDays(t, 1)) });
+    // ช่วงดึงปกติ = เมื่อวาน–พรุ่งนี้ แต่ถ้าในเครื่องยังมีรายการเปิดค้างเก่ากว่านั้น (เช่นเครื่องนี้ไม่ได้เปิดหลายวัน)
+    // ต้องขยายช่วงให้ครอบคลุม ไม่งั้นรายการที่ถูกปิด/แก้ในชีตแล้วจะค้างในเครื่องตลอดไป (สูงสุดย้อน 31 วัน)
+    let from = dateKey(addDays(t, -1)); const to = dateKey(addDays(t, 1)), floor = dateKey(addDays(t, -31));
+    live().forEach(r => { if (!r.end && r.date && r.date < from) from = r.date < floor ? floor : r.date; });
+    const data = await jsonp({ action: 'list', from, to });
     if (!data || !data.ok) throw new Error(data?.error || 'รูปแบบข้อมูลไม่ถูกต้อง');
     const map = new Map(state.records.map(r => [r.id, r])); const changed = [];
     (data.records || []).forEach(x => {
       const r = normalizeRecord(x); if (!r) return; const loc = map.get(r.id);
-      if (loc && loc.sync === 'pending') return; // ของในเครื่องที่ยังไม่ได้ส่ง ถือว่าใหม่กว่า
-      if (loc && loc.updatedAt === r.updatedAt && loc.photoStartUrl === r.photoStartUrl && loc.photoEndUrl === r.photoEndUrl) return;
+      // ของในเครื่องที่ยังไม่ได้ส่ง ถือว่าใหม่กว่า — ยกเว้น server ปิดรายการแล้วแต่เครื่องยังเปิดอยู่ (การปิดถือเป็นที่สุด)
+      if (loc && loc.sync === 'pending' && !(r.end && !loc.end)) return;
+      // เทียบหลายฟิลด์ ไม่ใช่แค่ updatedAt — กรณีมีคนแก้เวลาในชีตโดยตรง updatedAt จะไม่เปลี่ยน
+      if (loc && recSig(loc) === recSig(r)) return;
       const m = { ...r, photoStart: loc?.photoStart || null, photoEnd: loc?.photoEnd || null, sync: 'synced', everSynced: true };
       map.set(r.id, m); changed.push(m);
     });
     (data.deleted || []).forEach(id => { const loc = map.get(id); if (loc && loc.sync !== 'pending') { map.delete(id); DB.del(id); } });
+    // รายการที่เคยซิงก์แล้ว อยู่ในช่วงที่ดึง แต่ไม่มีใน server อีกต่อไป (เช่นลบแถวในชีตด้วยมือ) → ลบออกจากเครื่องด้วย
+    const seen = new Set([...(data.records || []).map(x => String(x.id)), ...(data.deleted || []).map(String)]);
+    [...map.values()].forEach(loc => { if (loc.sync === 'synced' && loc.date >= from && loc.date <= to && !seen.has(String(loc.id))) { map.delete(loc.id); DB.del(loc.id).catch(e => logError('db.del', e)); } });
+    // ล้างรายการเก่าที่ปิดแล้วเกิน 7 วันออกจากเครื่อง — ไม่ใช้ในฟอร์ม และทำให้ฐานข้อมูลในเครื่องไม่โตไม่จำกัด
+    const keep = dateKey(addDays(t, -7));
+    [...map.values()].forEach(loc => { if (loc.sync === 'synced' && loc.end && loc.date < keep) { map.delete(loc.id); DB.del(loc.id).catch(e => logError('db.del', e)); } });
     if (changed.length) await DB.putMany(changed);
     state.records = [...map.values()]; state.lastPull = Date.now(); state.online = true;
     if (!state.records.some(r => r.sync === 'pending')) setPill('ok', `● ออนไลน์ ${fmtTime(nowDate().toISOString())}`);
@@ -1201,7 +1220,7 @@ function tickActive() {
     ${r.note ? `<div class="mt-2 text-slate-600 dark:text-slate-300">📝 ${esc(r.note)}</div>` : ''}`;
 }
 function renderActiveList() {
-  const act = live().filter(r => !r.end).sort((a, b) => new Date(a.start) - new Date(b.start));
+  const act = openNow().sort((a, b) => new Date(a.start) - new Date(b.start));
   $('#activeCount').textContent = `${act.length} คน`;
   $('#activeList').innerHTML = act.length ? act.map(r => {
     const el = elapsedSec(r), over = el > recLimitSec(r), forgot = calcStatus(r) === 'forgot';
@@ -1224,7 +1243,7 @@ function renderActiveList() {
 }
 function renderHero() {
   const k = dateKey(nowDate()), today = live().filter(r => r.date === k);
-  $('#stActive').textContent = fmtNum(live().filter(r => !r.end && calcStatus(r) === 'active').length);
+  $('#stActive').textContent = fmtNum(openNow().length); // นับชุดเดียวกับรายการ "กำลังพักอยู่ขณะนี้" ตัวเลขจึงตรงกันเสมอ
   $('#stDone').textContent = fmtNum(today.filter(r => r.end).length);
   $('#stOver').textContent = fmtNum(today.filter(r => r.end && calcStatus(r) === 'over').length);
 }
@@ -1272,7 +1291,7 @@ function handleEvents() {
 }
 async function init() {
   $$('[data-limit]').forEach(x => x.textContent = CONFIG.LIMIT_MIN);
-  Splash.init({ info: mode => { const n = live().filter(r => !r.end && calcStatus(r) === 'active').length;
+  Splash.init({ info: mode => { const n = openNow().length;
     return mode === 'idle' ? (n ? `ขณะนี้มีพนักงานกำลังพัก ${n} คน` : 'ไม่มีพนักงานกำลังพักอยู่') : 'ระบบลงเวลาพักพนักงาน • ช่วงละไม่เกิน ' + CONFIG.LIMIT_MIN + ' นาที'; } });
   handleEvents(); checkTimezone();
   if (!(await DB.open())) toast('เบราว์เซอร์นี้เก็บข้อมูลถาวรไม่ได้ (อาจเป็นโหมดไม่ระบุตัวตน)', 'warn', 7000);
@@ -1292,8 +1311,8 @@ async function init() {
     tickActive(); checkOvertimeAlerts();
     $$('[data-live]').forEach(el => { const r = state.records.find(x => x.id === el.dataset.live); if (!r) return; el.textContent = fmtClock(elapsedSec(r));
       const bar = el.closest('button')?.querySelector('[data-bar]'); if (bar) bar.style.width = Math.min(100, elapsedSec(r) / recLimitSec(r) * 100).toFixed(1) + '%'; });
-    const over = live().filter(r => !r.end && elapsedSec(r) > recLimitSec(r)).length;
-    if (over !== tick.last) { tick.last = over; renderActiveList(); renderHero(); }
+    const on = openNow(), key = on.length + '|' + on.filter(r => elapsedSec(r) > recLimitSec(r)).length; // รายการที่หลุดกะ (> 16 ชม.) จะหายจากหน้าจอเองทันที
+    if (key !== tick.last) { tick.last = key; renderActiveList(); renderHero(); }
   } catch (e) { logError('tick', e); } }; // ห้าม error ในตัวจับเวลาทำให้หน้าจอหยุดนิ่ง
   tick(); setInterval(tick, 1000);
   setInterval(() => { if (!document.hidden) pull(); }, 20000);
