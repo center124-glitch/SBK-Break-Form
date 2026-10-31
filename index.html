@@ -1,6 +1,8 @@
 <!DOCTYPE html>
 <!--
-  SBK_Break_Form_v14.html — แอปฟอร์มแจ้งพักพนักงาน (v14)
+  SBK_Break_Form_v15.html — แอปฟอร์มแจ้งพักพนักงาน (v15)
+  v15: แก้ "กดบันทึกแล้วไม่เข้า Sheets" — ส่งเวลาแยกจากรูป (keepalive ไม่หลุดเมื่อสลับไป LINE/ปิดแอป), ยิงข้อมูลค้างตอนพับแอป,
+       ลองส่งซ้ำทุก 20 วินาที, แสดงสถานะบันทึกบนสลิป, กันข้อมูล list เก่าทับรายการที่เพิ่งบันทึก, เก็บรายการที่ถูกปฏิเสธไว้แจ้งเตือน
   v14: ยกเลิกการแจ้งเตือนเวลาพัก (แถบเตือน/เสียง/เสียงพูด/สั่น/แจ้งเตือนระบบ) ในฟอร์ม — คงไว้เฉพาะแอปแดชบอร์ด
   v13: ไอคอนแอปมุมโค้งพื้นหลังโปร่งใส (PC/มือถือ/แท็บเบราว์เซอร์)
   v12: แจ้งเตือนใกล้หมดเวลาพัก (เหลือ 5 นาที) / ครบเวลา / เกินซ้ำทุก 5 นาที — แถบเตือนค้างจอ + เสียง + เสียงพูด + สั่น + แจ้งเตือนระบบ
@@ -120,6 +122,11 @@
   @media (hover: hover) { .card:hover { box-shadow: inset 0 3px 0 -1px var(--g2), inset 0 1px 0 rgba(255,255,255,.9), 0 22px 44px -18px var(--card-sh), 0 4px 12px -4px rgba(30,41,59,.12); } }
   .dark .card { background: linear-gradient(165deg, rgba(30,41,59,.78), rgba(15,23,42,.72) 50%, rgba(30,27,75,.62)); border-color: rgba(148,163,184,.16);
     box-shadow: inset 0 3px 0 -1px var(--g1), inset 0 1px 0 rgba(255,255,255,.04), 0 14px 34px -14px rgba(0,0,0,.65); }
+  /* ---------- สถานะบันทึกบนหน้าสลิป ---------- */
+  .slip-sync { margin: 0 auto .6rem; max-width: 28rem; border-radius: 1rem; padding: .6rem .9rem; font-size: .85rem; font-weight: 700; text-align: center; color: #fff; box-shadow: 0 10px 24px -12px rgba(0,0,0,.5); }
+  .slip-sync.ok { background: linear-gradient(135deg, #10b981, #0d9488); }
+  .slip-sync.busy { background: linear-gradient(135deg, #f59e0b, #f97316); animation: baPulse 1.6s ease-in-out infinite; }
+  .slip-sync.err { background: linear-gradient(135deg, #f43f5e, #dc2626); }
   /* ---------- แถบแจ้งเตือนเวลาพัก ---------- */
   .ba-card { border-radius: 1.1rem; padding: .8rem .9rem; color: #fff; cursor: pointer; animation: baIn .35s cubic-bezier(.2,.9,.3,1.3);
     box-shadow: 0 18px 40px -14px rgba(15,23,42,.45), inset 0 1px 0 rgba(255,255,255,.35); }
@@ -427,6 +434,7 @@
 <div id="slipModal" class="hidden fixed inset-0 z-50 modal-bg overflow-y-auto">
   <div class="min-h-full flex items-start sm:items-center justify-center p-4">
     <div class="w-full max-w-md">
+      <div id="slipSync" class="hidden" role="status" aria-live="polite"></div>
       <div class="flex justify-center"><div id="slipWrap" class="rounded-2xl overflow-hidden shadow-2xl"></div></div>
       <div class="card p-3 mt-3 grid grid-cols-2 gap-2">
         <button id="slipShareImg" class="btn text-white bg-[#06C755] hover:brightness-95 col-span-2 !py-3">💬 ส่งรูปสลิปเข้า LINE</button>
@@ -607,17 +615,27 @@ function jsonp(params, timeout = 20000) {
 async function postGAS(payload, timeout = 45000) {
   // no-cors + text/plain: Apps Script ไม่ส่ง CORS header จึงอ่านผลไม่ได้ → ต้องยืนยันผลด้วย action=status อีกรอบ
   if (!navigator.onLine) throw new Error('เครื่องไม่ได้เชื่อมต่ออินเทอร์เน็ต');
+  const body = JSON.stringify(payload);
+  // v15: ข้อมูลเล็ก (≤ 60KB เช่น "เวลา" ที่ไม่มีรูป) ส่งแบบ keepalive → เบราว์เซอร์ส่งต่อจนจบแม้ผู้ใช้สลับไป LINE / ปิดแท็บ / ล็อกจอ
+  const keepalive = body.length < 60000;
   // ตั้งเวลาตัดการเชื่อมต่อ — กันกรณีเน็ตค้างแล้ว fetch ไม่จบ ทำให้คิวส่งข้อมูลหยุดนิ่ง
   const ac = typeof AbortController !== 'undefined' ? new AbortController() : null, t = ac && setTimeout(() => ac.abort(), timeout);
-  try { await fetch(CONFIG.GAS_URL, { method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(payload), signal: ac ? ac.signal : undefined }); }
+  try { await fetch(CONFIG.GAS_URL, { method: 'POST', mode: 'no-cors', keepalive, headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body, signal: ac ? ac.signal : undefined }); }
   catch (e) { throw new Error(e && e.name === 'AbortError' ? 'ส่งข้อมูลนานเกินกำหนด (เครือข่ายช้า)' : 'ส่งข้อมูลไม่สำเร็จ — ตรวจสอบอินเทอร์เน็ต'); }
   finally { t && clearTimeout(t); }
 }
+// ส่งโดยไม่รอผล (ใช้ตอนแอปถูกพับ/ปิด) — keepalive ทำให้คำขอวิ่งต่อหลังหน้าเว็บหายไป; ข้อมูลซ้ำไม่เป็นไรเพราะ upsert ฝั่ง server เป็น idempotent
+function beaconGAS(payload) {
+  try { const body = JSON.stringify(payload); if (body.length > 60000) return false;
+    fetch(CONFIG.GAS_URL, { method: 'POST', mode: 'no-cors', keepalive: true, headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body }).catch(() => {}); return true; }
+  catch (e) { return false; }
+}
 // ส่งแล้วถามผลซ้ำจนกว่าจะยืนยันได้ → คืน { ok:true, res } | { ok:false, error } | { ok:null } (ยังยืนยันไม่ได้ เช่นเน็ตหลุด)
-async function postAndConfirm(payload, key, isDone, tries = 7) {
+// v15: ถามผลนานขึ้น (~25 วินาที, ห่างขึ้นเรื่อย ๆ) — Apps Script ช่วงคนใช้เยอะ/เปิดครั้งแรกตอบช้าได้ถึง 10–20 วินาที
+async function postAndConfirm(payload, key, isDone, tries = 10) {
   await postGAS(payload);
   for (let i = 0; i < tries; i++) {
-    await sleep(i === 0 ? 900 : 1500);
+    await sleep(i === 0 ? 700 : Math.min(4000, 1000 + i * 400));
     try {
       const st = await jsonp({ action: 'status', id: key }, 12000);
       if (st && st.found) {
@@ -835,6 +853,7 @@ function openSlip(r) {
   $$('[data-zoom]', $('#slipWrap')).forEach(i => i.onclick = () => { if (!i.dataset.photo) openLightbox(i.src); });
   $('#slipModal').classList.remove('hidden');
   slipReady = hydratePhotos($('#slipWrap')); // โหลดรูปจาก Drive มาเป็น dataURL ก่อน เพื่อให้รูปสลิปที่บันทึก/แชร์มีภาพครบ
+  if (typeof window.renderSlipSync === 'function') window.renderSlipSync(); // ฟอร์ม: แสดงสถานะบันทึกเข้า Sheets บนหน้าสลิป
 }
 function lineText(r) {
   const st = calcStatus(r); const icon = { over: '⚠️', active: '⏳', forgot: '❓', ontime: '✅' }[st];
@@ -1058,15 +1077,36 @@ function setPill(mode, text) {
   const cls = { off: 'chip-mute', ok: 'chip-ok', busy: 'chip-active', err: 'chip-over' }[mode];
   $('#syncPill').className = `chip ${cls}`; $('#syncPill').textContent = text;
 }
+// รูปที่ถ่ายแล้วแต่ยังไม่มี URL บน Drive = ต้องอัปโหลด
+const photoPending = r => !r.deleted && ((r.photoStart && !r.photoStartUrl) || (r.photoEnd && !r.photoEndUrl));
 function renderPending() {
-  const n = state.records.filter(r => r.sync === 'pending').length;
-  $('#pendingBar').classList.toggle('hidden', !n);
-  $('#pendingText').textContent = `มี ${n} รายการที่ยังส่งขึ้น Google Sheets ไม่สำเร็จ (ข้อมูลเก็บไว้ในเครื่องแล้ว ระบบจะลองส่งใหม่อัตโนมัติ)`;
+  const n = state.records.filter(r => r.sync === 'pending').length, er = state.records.filter(r => r.sync === 'error'), ph = state.records.filter(r => r.sync === 'synced' && photoPending(r)).length;
+  const show = n || er.length || ph;
+  $('#pendingBar').classList.toggle('hidden', !show);
+  $('#pendingText').textContent = [
+    n ? `มี ${n} รายการที่ยังส่งเวลาเข้า Google Sheets ไม่สำเร็จ (เก็บไว้ในเครื่องแล้ว ระบบส่งซ้ำอัตโนมัติ — กรุณาอย่าล้างข้อมูลเบราว์เซอร์)` : '',
+    er.length ? `⛔ ${er.length} รายการถูกระบบปฏิเสธ: ${er[0].name} — ${er[0].syncError || ''} (แจ้งหัวหน้าแก้ในแดชบอร์ด)` : '',
+    ph ? `📷 รูปรออัปโหลด ${ph} รายการ (เวลาบันทึกแล้ว)` : ''].filter(Boolean).join(' • ');
+  renderSlipSync();
 }
-const toServer = r => ({ ...r, sync: undefined, photoStart: r.photoStartUrl ? '' : (r.photoStart || ''), photoEnd: r.photoEndUrl ? '' : (r.photoEnd || ''), slipNo: slipNo(r) });
+// สถานะการบันทึกบนหน้าสลิป — ให้ จนท. เห็นชัดว่า "บันทึกเข้าระบบแล้ว" ก่อนปิดแอป
+function renderSlipSync() {
+  const el = document.getElementById('slipSync'); if (!el) return;
+  if (typeof slipRec === 'undefined' || !slipRec || $('#slipModal').classList.contains('hidden')) { el.classList.add('hidden'); return; }
+  const r = state.records.find(x => x.id === slipRec.id);
+  if (!r) { el.className = 'slip-sync err'; el.textContent = '⛔ รายการนี้ถูกลบออกจากระบบแล้ว (โดยหัวหน้างาน) — หากไม่ถูกต้องกรุณาแจ้งหัวหน้า'; return; }
+  const m = r.sync === 'synced' ? (photoPending(r) ? ['ok', '✅ บันทึกเวลาเข้า Google Sheets แล้ว • กำลังอัปโหลดรูป...'] : ['ok', '✅ บันทึกเข้า Google Sheets เรียบร้อย ปิดแอปได้'])
+    : r.sync === 'error' ? ['err', '⛔ ระบบไม่รับรายการนี้: ' + (r.syncError || '') + ' — แจ้งหัวหน้า']
+    : ['busy', '⏳ กำลังบันทึกเข้า Google Sheets... กรุณารอสักครู่ก่อนปิดแอป'];
+  el.className = 'slip-sync ' + m[0]; el.textContent = m[1];
+}
+// v15: ส่ง "เวลา" แยกจาก "รูป" — ข้อมูลเวลาเล็กมาก ส่งได้เร็วแม้เน็ตมือถือช้า และส่งแบบ keepalive ได้
+// (เดิมส่งรวมรูป 2 ใบ ~200–400KB ถ้า จนท. สลับไป LINE / ปิดแอประหว่างอัปโหลด เวลา "กลับจากพัก" จะไม่ถึงชีต)
+const toServer = r => ({ ...r, sync: undefined, syncError: undefined, everSynced: undefined, photoStart: '', photoEnd: '', slipNo: slipNo(r) });
 let queue = Promise.resolve();
 function syncRecord(rec, isNew) { queue = queue.then(() => doSync(rec, isNew)).catch(() => {}); return queue; }
 async function doSync(rec, isNew) {
+  rec = state.records.find(x => x.id === rec.id) || rec; // ใช้ออบเจ็กต์ล่าสุดในหน้าจอเสมอ (pull อาจแทนที่ระหว่างรอคิว)
   if (rec.sync !== 'pending') return;
   setPill('busy', '⟳ กำลังบันทึก');
   let res;
@@ -1075,13 +1115,15 @@ async function doSync(rec, isNew) {
   } catch (e) { res = { ok: null }; }
   if (res.ok === true) {
     const sr = res.res.record || {};
-    rec.sync = 'synced'; rec.everSynced = true; rec.photoStartUrl = sr.photoStartUrl || rec.photoStartUrl; rec.photoEndUrl = sr.photoEndUrl || rec.photoEndUrl;
+    rec.syncError = '';
+    rec.sync = 'synced'; rec.everSynced = true; rec.syncedAt = Date.now(); rec.photoStartUrl = sr.photoStartUrl || rec.photoStartUrl; rec.photoEndUrl = sr.photoEndUrl || rec.photoEndUrl;
     // server เป็นตัวตัดสินสุดท้าย: ถ้าอีกเครื่องกดกลับจากพักไปก่อน (first-end-wins) หรือข้อมูลในชีตใหม่กว่า → ใช้ค่าจาก server
     if (res.res.stale || (sr.end && sr.end !== rec.end)) {
       const n = normalizeRecord(sr);
       if (n) { ['end', 'durationSec', 'updatedAt', 'closedBy', 'note', 'limitMin'].forEach(k => rec[k] = n[k]); toast('ข้อมูลรายการนี้ถูกบันทึกจากอีกเครื่องก่อนแล้ว — แสดงตามข้อมูลในระบบ', 'info', 6000); }
     }
     await DB.put(rec); setPill('ok', '● บันทึกแล้ว'); state.online = true;
+    if (photoPending(rec)) syncPhotos(rec); // เวลาเข้าชีตแล้ว → ค่อยอัปโหลดรูป (เข้าคิวต่อท้าย)
   } else if (res.ok === false) {
     // server ปฏิเสธ (เช่น อีกเครื่องเริ่มพักให้พนักงานคนนี้ไปแล้ว) → ยกเลิกรายการในเครื่อง แล้วดึงข้อมูลจริงมาแสดง
     toast('บันทึกไม่สำเร็จ: ' + res.error, 'err', 7000);
@@ -1093,7 +1135,39 @@ async function doSync(rec, isNew) {
   }
   renderPending(); renderAll(); if (state.selEmp) selectEmployee(state.selEmp.id, true);
 }
-function retryPending() { state.records.filter(r => r.sync === 'pending').forEach(r => syncRecord(r, !r.everSynced)); }
+// อัปโหลดรูปทีหลัง: action=attachPhotos (Code_Break_v7) — เติมเฉพาะช่องรูปที่ยังว่าง ไม่แตะเวลา
+// ถ้า server ยังเป็นเวอร์ชันเก่า (unknown action) → ส่ง upsert พร้อมรูปแทน (เวอร์ชันเก่ารองรับการเติมรูปเมื่อ updatedAt เท่าเดิม)
+const photoBusy = new Set();
+function syncPhotos(rec) {
+  if (photoBusy.has(rec.id)) return queue; photoBusy.add(rec.id);
+  queue = queue.then(() => doPhotos(rec)).catch(e => logError('photos', e)).finally(() => photoBusy.delete(rec.id)); return queue;
+}
+async function doPhotos(rec) {
+  rec = state.records.find(x => x.id === rec.id) || rec;
+  if (rec.sync !== 'synced' || !photoPending(rec)) return;
+  const payload = { action: 'attachPhotos', batchId: 'ph_' + rec.id, id: rec.id, photoStart: rec.photoStartUrl ? '' : (rec.photoStart || ''), photoEnd: rec.photoEndUrl ? '' : (rec.photoEnd || ''), photoStartAt: rec.photoStartAt || '', photoEndAt: rec.photoEndAt || '' };
+  let res;
+  try { res = await postAndConfirm(payload, 'ph_' + rec.id, st => st.record && (!rec.photoStart || st.record.photoStartUrl) && (!rec.photoEnd || st.record.photoEndUrl), 10); }
+  catch (e) { res = { ok: null }; }
+  if (res.ok === false && /unknown action/i.test(res.error || '')) {
+    try { res = await postAndConfirm({ action: 'upsert', record: { ...toServer(rec), photoStart: rec.photoStartUrl ? '' : (rec.photoStart || ''), photoEnd: rec.photoEndUrl ? '' : (rec.photoEnd || '') } }, rec.id,
+      st => st.record && (!rec.photoStart || st.record.photoStartUrl) && (!rec.photoEnd || st.record.photoEndUrl)); } catch (e) { res = { ok: null }; }
+  }
+  if (res.ok === true) {
+    const sr = res.res.record || {};
+    rec.photoStartUrl = sr.photoStartUrl || rec.photoStartUrl; rec.photoEndUrl = sr.photoEndUrl || rec.photoEndUrl;
+    await DB.put(rec).catch(e => logError('db.put', e));
+  } else if (res.ok === false) logError('photos.rejected', new Error(res.error || ''));
+  renderPending();
+}
+function retryPending() {
+  state.records.filter(r => r.sync === 'pending').forEach(r => syncRecord(r, !r.everSynced));
+  state.records.filter(r => r.sync === 'synced' && photoPending(r)).forEach(syncPhotos);
+}
+// แอปถูกพับ/สลับไป LINE/ปิดแท็บ ขณะยังมีรายการค้างส่ง → ยิงข้อมูลเวลาแบบ keepalive ทันที (เบราว์เซอร์ส่งต่อให้แม้หน้าเว็บถูกปิด)
+function flushOnHide() {
+  state.records.filter(r => r.sync === 'pending').forEach(r => beaconGAS({ action: 'upsert', record: toServer(r) }));
+}
 // ลายเซ็นของฟิลด์ที่มีผลต่อการแสดงผล — ใช้ตัดสินว่าข้อมูลจาก server ต่างจากในเครื่องหรือไม่
 const recSig = r => [r.updatedAt, r.start, r.end || '', r.breakNo, r.empId, r.name, r.closedBy || '', r.note || '', r.limitMin, r.photoStartUrl || '', r.photoEndUrl || ''].join('|');
 async function pull(force = false) {
@@ -1105,6 +1179,7 @@ async function pull(force = false) {
     // ต้องขยายช่วงให้ครอบคลุม ไม่งั้นรายการที่ถูกปิด/แก้ในชีตแล้วจะค้างในเครื่องตลอดไป (สูงสุดย้อน 31 วัน)
     let from = dateKey(addDays(t, -1)); const to = dateKey(addDays(t, 1)), floor = dateKey(addDays(t, -31));
     live().forEach(r => { if (!r.end && r.date && r.date < from) from = r.date < floor ? floor : r.date; });
+    const t0 = Date.now(); // ข้อมูลที่ server ตอบกลับคือภาพ ณ เวลานี้ — รายการที่เพิ่งยืนยันบันทึกหลังจากนี้ ห้ามถูกข้อมูลชุดนี้ทับ/ลบ
     const data = await jsonp({ action: 'list', from, to });
     if (!data || !data.ok) throw new Error(data?.error || 'รูปแบบข้อมูลไม่ถูกต้อง');
     const map = new Map(state.records.map(r => [r.id, r])); const changed = [];
@@ -1112,6 +1187,10 @@ async function pull(force = false) {
       const r = normalizeRecord(x); if (!r) return; const loc = map.get(r.id);
       // ของในเครื่องที่ยังไม่ได้ส่ง ถือว่าใหม่กว่า — ยกเว้น server ปิดรายการแล้วแต่เครื่องยังเปิดอยู่ (การปิดถือเป็นที่สุด)
       if (loc && loc.sync === 'pending' && !(r.end && !loc.end)) return;
+      // v15: เพิ่งบันทึกสำเร็จระหว่างที่คำขอ list กำลังวิ่ง → ข้อมูล list เก่ากว่า (เช่นยังไม่มีเวลากลับ) ห้ามทับ ไม่งั้นรายการจะ "กลับมาเป็นกำลังพัก"
+      if (loc && (loc.syncedAt || 0) >= t0) return;
+      // รายการที่ server เคยปฏิเสธ → เก็บของในเครื่องไว้ให้เห็น จนกว่าหัวหน้าจะแก้ในระบบ (ข้อมูลใน server ใหม่กว่า)
+      if (loc && loc.sync === 'error' && !(r.updatedAt > loc.updatedAt)) return;
       // เทียบหลายฟิลด์ ไม่ใช่แค่ updatedAt — กรณีมีคนแก้เวลาในชีตโดยตรง updatedAt จะไม่เปลี่ยน
       if (loc && recSig(loc) === recSig(r)) return;
       const m = { ...r, photoStart: loc?.photoStart || null, photoEnd: loc?.photoEnd || null, sync: 'synced', everSynced: true };
@@ -1120,14 +1199,14 @@ async function pull(force = false) {
     (data.deleted || []).forEach(id => { const loc = map.get(id); if (loc && loc.sync !== 'pending') { map.delete(id); DB.del(id); } });
     // รายการที่เคยซิงก์แล้ว อยู่ในช่วงที่ดึง แต่ไม่มีใน server อีกต่อไป (เช่นลบแถวในชีตด้วยมือ) → ลบออกจากเครื่องด้วย
     const seen = new Set([...(data.records || []).map(x => String(x.id)), ...(data.deleted || []).map(String)]);
-    [...map.values()].forEach(loc => { if (loc.sync === 'synced' && loc.date >= from && loc.date <= to && !seen.has(String(loc.id))) { map.delete(loc.id); DB.del(loc.id).catch(e => logError('db.del', e)); } });
+    [...map.values()].forEach(loc => { if (loc.sync === 'synced' && (loc.syncedAt || 0) < t0 && loc.date >= from && loc.date <= to && !seen.has(String(loc.id))) { map.delete(loc.id); DB.del(loc.id).catch(e => logError('db.del', e)); } });
     // ล้างรายการเก่าที่ปิดแล้วเกิน 7 วันออกจากเครื่อง — ไม่ใช้ในฟอร์ม และทำให้ฐานข้อมูลในเครื่องไม่โตไม่จำกัด
     const keep = dateKey(addDays(t, -7));
-    [...map.values()].forEach(loc => { if (loc.sync === 'synced' && loc.end && loc.date < keep) { map.delete(loc.id); DB.del(loc.id).catch(e => logError('db.del', e)); } });
+    [...map.values()].forEach(loc => { if (loc.sync === 'synced' && loc.end && loc.date < keep && !photoPending(loc)) { map.delete(loc.id); DB.del(loc.id).catch(e => logError('db.del', e)); } });
     if (changed.length) await DB.putMany(changed);
     state.records = [...map.values()]; state.lastPull = Date.now(); state.online = true;
     if (!state.records.some(r => r.sync === 'pending')) setPill('ok', `● ออนไลน์ ${fmtTime(nowDate().toISOString())}`);
-    renderAll(); if (state.selEmp) selectEmployee(state.selEmp.id, true);
+    renderAll(); renderSlipSync(); if (state.selEmp) selectEmployee(state.selEmp.id, true);
   } catch (e) {
     state.online = false; setPill('err', '● ออฟไลน์');
     if (force) toast(e.message, 'err', 5000);
@@ -1471,7 +1550,11 @@ function handleEvents() {
   $('#btnActiveSlip').onclick = () => { const r = state.selEmp && activeOf(state.selEmp.id); if (r) openSlip(r); };
   $('#btnRetry').onclick = () => { retryPending(); toast('กำลังส่งรายการค้างส่งอีกครั้ง', 'info'); };
   $('#syncPill').onclick = () => { retryPending(); pull(true); };
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) { pull(); retryPending(); } });
+  document.addEventListener('visibilitychange', () => { if (document.hidden) flushOnHide(); else { pull(); retryPending(); } });
+  window.addEventListener('pagehide', flushOnHide);
+  window.addEventListener('pageshow', e => { if (e.persisted) { pull(true); retryPending(); } }); // กลับมาจาก back-forward cache
+  // มีรายการค้างส่ง → ขอให้ยืนยันก่อนปิดแท็บ (เบราว์เซอร์คอมพิวเตอร์)
+  window.addEventListener('beforeunload', e => { if (state.records.some(r => r.sync === 'pending')) { flushOnHide(); e.preventDefault(); e.returnValue = ''; } });
   window.addEventListener('online', () => { toast('กลับมาออนไลน์แล้ว กำลังซิงก์ข้อมูล', 'info'); retryPending(); pull(true); });
   // เมื่อขึ้นหน้าพักหน้าจอ → ล้างพนักงานที่เลือกไว้ เพื่อให้คนถัดไปเริ่มใหม่ (เครื่องใช้ร่วมกันที่จุดรปภ.)
   document.addEventListener('splash:show', e => { if (e.detail === 'idle') { clearEmployee(); $('#slipModal').classList.add('hidden'); if (!$('#camModal').classList.contains('hidden')) $('#camCancel').click(); } });
@@ -1481,12 +1564,14 @@ async function init() {
   Splash.init({ info: mode => { const n = openNow().length;
     return mode === 'idle' ? (n ? `ขณะนี้มีพนักงานกำลังพัก ${n} คน` : 'ไม่มีพนักงานกำลังพักอยู่') : 'ระบบลงเวลาพักพนักงาน • ช่วงละไม่เกิน ' + CONFIG.LIMIT_MIN + ' นาที'; } });
   handleEvents(); checkTimezone();
-  if (!(await DB.open())) toast('เบราว์เซอร์นี้เก็บข้อมูลถาวรไม่ได้ (อาจเป็นโหมดไม่ระบุตัวตน)', 'warn', 7000);
+  if (!(await DB.open())) toast('เบราว์เซอร์นี้เก็บข้อมูลในเครื่องไม่ได้ (อาจเป็นโหมดไม่ระบุตัวตน / เปิดใน LINE) — ถ้าเน็ตหลุด รายการค้างส่งจะหายเมื่อปิดแอป กรุณาเปิดด้วย Chrome/Safari', 'warn', 9000);
+  // ขอให้เบราว์เซอร์ "ไม่ลบข้อมูลในเครื่องอัตโนมัติ" เมื่อพื้นที่เหลือน้อย — กันรายการค้างส่งหาย
+  try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch (e) {}
   try {
     const all = (await DB.all()) || [];
     // ล้างรายการเก่าที่ส่งสำเร็จแล้ว (เกิน 3 วัน) ลดพื้นที่ในเครื่อง — ข้อมูลจริงอยู่ใน Google Sheets
     const cut = dateKey(addDays(new Date(), -3));
-    state.records = all.filter(r => { const old = r.sync === 'synced' && r.date < cut; if (old) DB.del(r.id); return !old; });
+    state.records = all.filter(r => { const old = r.sync === 'synced' && r.date < cut && !photoPending(r); if (old) DB.del(r.id); return !old; });
   } catch (e) { toast('โหลดข้อมูลในเครื่องไม่สำเร็จ: ' + e.message, 'err'); }
   try { const c = JSON.parse(localStorage.getItem('sbk_break_emp') || 'null'); state.employees = Array.isArray(c) && c.length ? c : DEFAULT_EMP; } catch (e) { state.employees = DEFAULT_EMP; }
   live().filter(r => !r.end && elapsedSec(r) > recLimitSec(r)).forEach(r => state.overAlerted.add(r.id));
@@ -1503,7 +1588,8 @@ async function init() {
   } catch (e) { logError('tick', e); } }; // ห้าม error ในตัวจับเวลาทำให้หน้าจอหยุดนิ่ง
   tick(); setInterval(tick, 1000);
   setInterval(() => { if (!document.hidden) pull(); }, 20000);
-  setInterval(() => { if (!document.hidden) retryPending(); }, 45000);
+  // ค้างส่งอยู่ → ลองใหม่ทุก 20 วินาที (เดิม 45) ให้ข้อมูลเข้าชีตเร็วที่สุดหลังเน็ตกลับมา
+  setInterval(() => { if (!document.hidden && state.records.some(r => r.sync === 'pending' || (r.sync === 'synced' && photoPending(r)))) retryPending(); }, 20000);
 
   // โหลดรายชื่อล่าสุดจากชีต Employees (ถ้าออฟไลน์ใช้รายชื่อที่จำไว้/รายชื่อเริ่มต้น)
   fetchEmployees().then(list => { if (list.length) { state.employees = list; try { localStorage.setItem('sbk_break_emp', JSON.stringify(list)); } catch (e) {} } })
