@@ -1,6 +1,9 @@
 <!DOCTYPE html>
 <!--
-  SBK_Break_Form_v15.html — แอปฟอร์มแจ้งพักพนักงาน (v15)
+  SBK_Break_Form_v17.html — แอปฟอร์มแจ้งพักพนักงาน (v17)
+  v17: กด "กลับจากพัก" = บันทึกเวลาจริง ณ ตอนกดทันที (ยกเลิกหน้าต่างถามเวลากลับจริง/ตัวเลือก)
+  v16: กดกลับจากพักเมื่อเกินเวลา → ถามว่ากลับถึงจุดจริงเวลาใด (กรณีลืมกด) บันทึก "เวลากลับจริง + เหตุผล" ไว้ด้วย
+       ระยะเวลา/เกินเวลา ยังคิดจากเวลาที่กดเป็นหลัก (หัวหน้าตัดสินใช้เวลาจริงได้ในแดชบอร์ด)
   v15: แก้ "กดบันทึกแล้วไม่เข้า Sheets" — ส่งเวลาแยกจากรูป (keepalive ไม่หลุดเมื่อสลับไป LINE/ปิดแอป), ยิงข้อมูลค้างตอนพับแอป,
        ลองส่งซ้ำทุก 20 วินาที, แสดงสถานะบันทึกบนสลิป, กันข้อมูล list เก่าทับรายการที่เพิ่งบันทึก, เก็บรายการที่ถูกปฏิเสธไว้แจ้งเตือน
   v14: ยกเลิกการแจ้งเตือนเวลาพัก (แถบเตือน/เสียง/เสียงพูด/สั่น/แจ้งเตือนระบบ) ในฟอร์ม — คงไว้เฉพาะแอปแดชบอร์ด
@@ -564,6 +567,8 @@ function normalizeRecord(r) {
     limitMin: Number(r.limitMin) >= 5 && Number(r.limitMin) <= 240 ? Number(r.limitMin) : CONFIG.LIMIT_MIN, photoStartUrl: r.photoStartUrl || '', photoEndUrl: r.photoEndUrl || '' };
   // คำนวณระยะเวลาใหม่จาก start/end เสมอ ไม่เชื่อตัวเลขที่เก็บมา (กันชีตถูกแก้มือ)
   rec.durationSec = rec.end ? Math.round((new Date(rec.end) - s) / 1000) : 0;
+  // v16: เวลากลับจริงที่ จนท. แจ้ง (กรณีลืมกด) — ต้องอยู่ระหว่างเวลาเริ่ม ถึงเวลาที่กดกลับ ไม่งั้นถือว่าไม่มี
+  { const a = r.actualEnd ? new Date(r.actualEnd) : null; rec.actualEnd = a && !isNaN(a) && rec.end && a >= s && a <= new Date(rec.end) ? a.toISOString() : ''; rec.actualReason = rec.actualEnd ? String(r.actualReason || '') : ''; }
   return rec;
 }
 
@@ -620,7 +625,9 @@ async function postGAS(payload, timeout = 45000) {
   const keepalive = body.length < 60000;
   // ตั้งเวลาตัดการเชื่อมต่อ — กันกรณีเน็ตค้างแล้ว fetch ไม่จบ ทำให้คิวส่งข้อมูลหยุดนิ่ง
   const ac = typeof AbortController !== 'undefined' ? new AbortController() : null, t = ac && setTimeout(() => ac.abort(), timeout);
-  try { await fetch(CONFIG.GAS_URL, { method: 'POST', mode: 'no-cors', keepalive, headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body, signal: ac ? ac.signal : undefined }); }
+  // Promise.race: บางเครื่อง/บางเครือข่าย fetch ไม่ตอบและไม่ error (สลับ Wi-Fi↔4G) — ห้ามให้คิวรอไม่รู้จบ
+  try { await Promise.race([fetch(CONFIG.GAS_URL, { method: 'POST', mode: 'no-cors', keepalive, headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body, signal: ac ? ac.signal : undefined }),
+    new Promise((_, rej) => setTimeout(() => rej(Object.assign(new Error('timeout'), { name: 'AbortError' })), timeout + 2000))]); }
   catch (e) { throw new Error(e && e.name === 'AbortError' ? 'ส่งข้อมูลนานเกินกำหนด (เครือข่ายช้า)' : 'ส่งข้อมูลไม่สำเร็จ — ตรวจสอบอินเทอร์เน็ต'); }
   finally { t && clearTimeout(t); }
 }
@@ -633,7 +640,9 @@ function beaconGAS(payload) {
 // ส่งแล้วถามผลซ้ำจนกว่าจะยืนยันได้ → คืน { ok:true, res } | { ok:false, error } | { ok:null } (ยังยืนยันไม่ได้ เช่นเน็ตหลุด)
 // v15: ถามผลนานขึ้น (~25 วินาที, ห่างขึ้นเรื่อย ๆ) — Apps Script ช่วงคนใช้เยอะ/เปิดครั้งแรกตอบช้าได้ถึง 10–20 วินาที
 async function postAndConfirm(payload, key, isDone, tries = 10) {
-  await postGAS(payload);
+  // v16: ส่งไม่สำเร็จ (เน็ตสะดุด/หมดเวลา) ข้อมูลอาจถึง server แล้วก็ได้ (หรือถูกส่งไปแล้วด้วย keepalive) → ยังถามผลต่อ 3 รอบก่อนสรุปว่าไม่สำเร็จ
+  let sendErr = null;
+  try { await postGAS(payload); } catch (e) { sendErr = e; tries = Math.min(tries, 3); if (typeof state !== 'undefined') state.lastSyncErr = e.message; }
   for (let i = 0; i < tries; i++) {
     await sleep(i === 0 ? 700 : Math.min(4000, 1000 + i * 400));
     try {
@@ -644,9 +653,10 @@ async function postAndConfirm(payload, key, isDone, tries = 10) {
         if (st.ok === false) return { ok: false, error: st.error || 'บันทึกไม่สำเร็จ' };
         if (!isDone || isDone(st)) return { ok: true, res: st };
       }
-    } catch (e) { /* ลองใหม่รอบถัดไป */ }
+    } catch (e) { if (typeof state !== 'undefined') state.lastSyncErr = e.message; /* ลองใหม่รอบถัดไป */ }
   }
-  return { ok: null };
+  if (!sendErr && typeof state !== 'undefined') state.lastSyncErr = 'ส่งแล้วแต่ยังยืนยันผลจาก Google Sheets ไม่ได้ (ระบบจะลองใหม่)';
+  return { ok: null, error: sendErr && sendErr.message };
 }
 async function fetchEmployees() {
   const r = await jsonp({ action: 'employees' });
@@ -835,8 +845,9 @@ function slipHTML(r) {
       ${row('ช่วงการพัก', `พักช่วงที่ ${r.breakNo}`)}
       ${row('วันที่', fmtDateBEFull(keyToDate(r.date)))}
       ${row('เวลาเริ่มพัก', fmtTimeS(r.start) + ' น.')}
-      ${row('เวลากลับจากพัก', r.end ? fmtTimeS(r.end) + ' น.' : '—')}
+      ${row(r.actualEnd ? 'เวลากดกลับ (ระบบ)' : 'เวลากลับจากพัก', r.end ? fmtTimeS(r.end) + ' น.' : '—')}
       ${row('ระยะเวลาพัก', dur, head)}
+      ${r.actualEnd ? row('เวลากลับจริง (แจ้ง)', `${fmtTime(r.actualEnd)} น. <span style="font-weight:400;color:#64748b">(${fmtDur((new Date(r.actualEnd) - new Date(r.start)) / 1000)})</span>`, '#6d28d9') + row('เหตุที่กดช้า', esc(r.actualReason || '-')) : ''}
       ${row('เกณฑ์ที่กำหนด', `ไม่เกิน ${Number(r.limitMin) || CONFIG.LIMIT_MIN} นาที`)}
       ${r.note ? row('หมายเหตุ', esc(r.note)) : ''}
       ${r.closedBy ? row('ปิดรายการโดย', esc(r.closedBy)) : ''}
@@ -861,6 +872,7 @@ function lineText(r) {
     `ช่วงพัก: ช่วงที่ ${r.breakNo}`, `วันที่: ${fmtDateBE(keyToDate(r.date))}`,
     `เริ่มพัก: ${fmtTime(r.start)} น.`, `กลับจากพัก: ${r.end ? fmtTime(r.end) + ' น.' : 'ยังไม่กลับ'}`,
     `ระยะเวลา: ${r.end ? fmtDur(r.durationSec) : fmtDur(elapsedSec(r)) + ' (กำลังพัก)'}`, `สถานะ: ${statusText(r)}`,
+    r.actualEnd ? `แจ้งกลับจริง: ${fmtTime(r.actualEnd)} น. (${r.actualReason || '-'}) — ระบบคิดตามเวลาที่กด` : '',
     r.note ? `หมายเหตุ: ${r.note}` : '', `เลขที่: ${slipNo(r)}`].filter(Boolean).join('\n');
 }
 async function slipBlob() {
@@ -1086,7 +1098,8 @@ function renderPending() {
   $('#pendingText').textContent = [
     n ? `มี ${n} รายการที่ยังส่งเวลาเข้า Google Sheets ไม่สำเร็จ (เก็บไว้ในเครื่องแล้ว ระบบส่งซ้ำอัตโนมัติ — กรุณาอย่าล้างข้อมูลเบราว์เซอร์)` : '',
     er.length ? `⛔ ${er.length} รายการถูกระบบปฏิเสธ: ${er[0].name} — ${er[0].syncError || ''} (แจ้งหัวหน้าแก้ในแดชบอร์ด)` : '',
-    ph ? `📷 รูปรออัปโหลด ${ph} รายการ (เวลาบันทึกแล้ว)` : ''].filter(Boolean).join(' • ');
+    ph ? `📷 รูปรออัปโหลด ${ph} รายการ (เวลาบันทึกแล้ว)` : '',
+    n && state.lastSyncErr ? `สาเหตุล่าสุด: ${state.lastSyncErr}` : ''].filter(Boolean).join(' • ');
   renderSlipSync();
 }
 // สถานะการบันทึกบนหน้าสลิป — ให้ จนท. เห็นชัดว่า "บันทึกเข้าระบบแล้ว" ก่อนปิดแอป
@@ -1103,16 +1116,31 @@ function renderSlipSync() {
 // v15: ส่ง "เวลา" แยกจาก "รูป" — ข้อมูลเวลาเล็กมาก ส่งได้เร็วแม้เน็ตมือถือช้า และส่งแบบ keepalive ได้
 // (เดิมส่งรวมรูป 2 ใบ ~200–400KB ถ้า จนท. สลับไป LINE / ปิดแอประหว่างอัปโหลด เวลา "กลับจากพัก" จะไม่ถึงชีต)
 const toServer = r => ({ ...r, sync: undefined, syncError: undefined, everSynced: undefined, photoStart: '', photoEnd: '', slipNo: slipNo(r) });
-let queue = Promise.resolve();
-function syncRecord(rec, isNew) { queue = queue.then(() => doSync(rec, isNew)).catch(() => {}); return queue; }
+/* v16: แยก 2 คิว + กันคิวค้าง
+   - คิว "เวลา" (เริ่ม/กลับจากพัก) ต้องไม่รอคิว "รูป" — เดิมใช้คิวเดียว รูปขนาดใหญ่ที่อัปโหลดช้า/ล้มเหลวซ้ำ ๆ บนเน็ตมือถือ
+     ทำให้ "กลับจากพัก" ต่อคิวรอนานจนไม่เข้า Sheets
+   - กันส่งซ้ำซ้อน: รายการเดียวกันอยู่ในคิวได้ครั้งเดียว (เดิม retry ทุก 20 วินาทีเพิ่มงานซ้ำเข้าคิวเรื่อย ๆ จนคิวยาวไม่รู้จบ)
+   - ทุกงานมีเวลาสูงสุด (watchdog) — งานไหนค้างเกินกำหนด คิวข้ามไปทำงานถัดไปได้เสมอ */
+const withTimeout = (p, ms, label) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout: ' + label)), ms))]);
+let photoQueue = Promise.resolve();
+// แต่ละรายการมีคิวของตัวเอง (ส่งพร้อมกันได้) — รายการหนึ่งเน็ตค้าง ไม่ทำให้คนอื่นต้องรอ
+// ถ้ามีการแก้ไข (เช่นกดกลับ) ระหว่างกำลังส่ง → จดไว้แล้วส่งรอบใหม่ทันทีที่รอบเดิมจบ
+const chains = new Map(), rerun = new Set();
+function syncRecord(rec, isNew) {
+  if (chains.has(rec.id)) { rerun.add(rec.id); return chains.get(rec.id); }
+  const p = withTimeout(doSync(rec, isNew), 150000, 'sync').catch(e => { logError('sync', e); setPill('err', '● ค้างส่ง'); })
+    .finally(() => { chains.delete(rec.id); if (rerun.delete(rec.id)) { const r = state.records.find(x => x.id === rec.id); if (r && r.sync === 'pending') syncRecord(r, !r.everSynced); } });
+  chains.set(rec.id, p); return p;
+}
 async function doSync(rec, isNew) {
   rec = state.records.find(x => x.id === rec.id) || rec; // ใช้ออบเจ็กต์ล่าสุดในหน้าจอเสมอ (pull อาจแทนที่ระหว่างรอคิว)
   if (rec.sync !== 'pending') return;
   setPill('busy', '⟳ กำลังบันทึก');
-  let res;
+  let res; const u0 = rec.updatedAt; // ข้อมูลรอบนี้ — ถ้ามีการแก้ไขใหม่ระหว่างส่ง (กดกลับ) ห้ามสรุปว่า "บันทึกแล้ว"
   try {
-    res = await postAndConfirm({ action: 'upsert', record: toServer(rec) }, rec.id, st => st.record && (st.stale || st.record.updatedAt >= rec.updatedAt));
+    res = await postAndConfirm({ action: 'upsert', record: toServer(rec) }, rec.id, st => st.record && (st.stale || st.record.updatedAt >= u0));
   } catch (e) { res = { ok: null }; }
+  if (res.ok === true && rec.updatedAt !== u0 && !res.res.stale) { rerun.add(rec.id); res = { ok: null, error: 'มีการแก้ไขระหว่างส่ง — ส่งรอบใหม่' }; }
   if (res.ok === true) {
     const sr = res.res.record || {};
     rec.syncError = '';
@@ -1138,10 +1166,20 @@ async function doSync(rec, isNew) {
 // อัปโหลดรูปทีหลัง: action=attachPhotos (Code_Break_v7) — เติมเฉพาะช่องรูปที่ยังว่าง ไม่แตะเวลา
 // ถ้า server ยังเป็นเวอร์ชันเก่า (unknown action) → ส่ง upsert พร้อมรูปแทน (เวอร์ชันเก่ารองรับการเติมรูปเมื่อ updatedAt เท่าเดิม)
 const photoBusy = new Set();
-function syncPhotos(rec) {
-  if (photoBusy.has(rec.id)) return queue; photoBusy.add(rec.id);
-  queue = queue.then(() => doPhotos(rec)).catch(e => logError('photos', e)).finally(() => photoBusy.delete(rec.id)); return queue;
+// อัปโหลดรูปล้มเหลว → รอนานขึ้นเรื่อย ๆ ก่อนลองใหม่ (20 วิ → 1 → 2 → 5 → 10 นาที) ไม่แย่งเน็ตกับการบันทึกเวลา
+const photoNext = new Map(), PHOTO_BACKOFF = [20e3, 60e3, 120e3, 300e3, 600e3];
+function syncPhotos(rec, force) {
+  if (photoBusy.has(rec.id)) return photoQueue;
+  const nx = photoNext.get(rec.id); if (!force && nx && Date.now() < nx.at) return photoQueue;
+  photoBusy.add(rec.id);
+  photoQueue = photoQueue.then(async () => {
+    // รอให้คิวเวลาว่างก่อน (เวลาสำคัญกว่ารูป) — รอสูงสุด 2 นาที
+    for (let i = 0; i < 24 && state.records.some(r => r.sync === 'pending'); i++) await sleep(5000);
+    return withTimeout(doPhotos(rec), 240000, 'photos');
+  }).catch(e => { logError('photos', e); bumpPhoto(rec.id); }).finally(() => photoBusy.delete(rec.id));
+  return photoQueue;
 }
+function bumpPhoto(id) { const n = (photoNext.get(id)?.n || 0) + 1; photoNext.set(id, { n, at: Date.now() + PHOTO_BACKOFF[Math.min(n, PHOTO_BACKOFF.length) - 1] }); }
 async function doPhotos(rec) {
   rec = state.records.find(x => x.id === rec.id) || rec;
   if (rec.sync !== 'synced' || !photoPending(rec)) return;
@@ -1156,8 +1194,9 @@ async function doPhotos(rec) {
   if (res.ok === true) {
     const sr = res.res.record || {};
     rec.photoStartUrl = sr.photoStartUrl || rec.photoStartUrl; rec.photoEndUrl = sr.photoEndUrl || rec.photoEndUrl;
+    photoNext.delete(rec.id);
     await DB.put(rec).catch(e => logError('db.put', e));
-  } else if (res.ok === false) logError('photos.rejected', new Error(res.error || ''));
+  } else { bumpPhoto(rec.id); if (res.ok === false) logError('photos.rejected', new Error(res.error || '')); }
   renderPending();
 }
 function retryPending() {
@@ -1168,6 +1207,9 @@ function retryPending() {
 function flushOnHide() {
   state.records.filter(r => r.sync === 'pending').forEach(r => beaconGAS({ action: 'upsert', record: toServer(r) }));
 }
+// v16: ยิงข้อมูลเวลาออกไปทันทีที่กดปุ่ม (ไม่รอคิว) — ถ้า จนท. ปิดแอป/ล็อกจอทันที ข้อมูลก็ออกจากเครื่องไปแล้ว
+// คิวปกติจะส่งซ้ำและยืนยันผลอีกครั้ง (upsert ฝั่ง server ส่งซ้ำได้ ไม่เกิดแถวซ้ำ)
+function fireNow(rec) { try { if (navigator.onLine !== false) beaconGAS({ action: 'upsert', record: toServer(rec) }); } catch (e) { logError('fireNow', e); } }
 // ลายเซ็นของฟิลด์ที่มีผลต่อการแสดงผล — ใช้ตัดสินว่าข้อมูลจาก server ต่างจากในเครื่องหรือไม่
 const recSig = r => [r.updatedAt, r.start, r.end || '', r.breakNo, r.empId, r.name, r.closedBy || '', r.note || '', r.limitMin, r.photoStartUrl || '', r.photoEndUrl || ''].join('|');
 async function pull(force = false) {
@@ -1235,7 +1277,7 @@ async function startBreak() {
     clearPhoto('start'); $('#noteStart').value = '';
     toast(`เริ่มพักช่วงที่ ${rec.breakNo} เวลา ${fmtTime(rec.start)} น.`);
     renderAll(); selectEmployee(emp.id); renderPending();
-    syncRecord(rec, true);
+    fireNow(rec); syncRecord(rec, true);
   } catch (e) { toast('บันทึกไม่สำเร็จ: ' + e.message, 'err', 5000); }
   finally { setBusy(btn, false); }
 }
@@ -1245,21 +1287,22 @@ async function endBreak() {
   // ค้างเกิน 24 ชม. = ข้อมูลผิดปกติ (server จะไม่รับ) → ให้หัวหน้าแก้เวลาจริงจากแดชบอร์ดแทน
   if (elapsedSec(rec) > 24 * 3600) return toast('รายการนี้ค้างเกิน 24 ชม. ไม่สามารถกดกลับจากฟอร์มได้ — กรุณาแจ้งหัวหน้าแก้ไขเวลากลับในแอปแดชบอร์ด', 'err', 8000);
   if (!requirePhoto('end')) return;
-  if (calcStatus(rec) === 'forgot' && !(await confirmBox('ยืนยันเวลากลับจากพัก', `รายการนี้เริ่มพักเมื่อ ${fmtTime(rec.start)} น. (ผ่านมา ${fmtDur(elapsedSec(rec))}) ระบบจะบันทึกเวลากลับเป็น "ตอนนี้" ถ้าไม่ตรงกับความจริง ให้หัวหน้าแก้ไขในแดชบอร์ดภายหลัง`, 'บันทึกเวลาตอนนี้', false))) return;
+  // v17: กดกลับ = บันทึกเวลาจริง ณ ตอนกดทันที ไม่มีหน้าต่างถาม/ตัวเลือก (เกินเวลาหรือลืมกด หัวหน้าแก้ได้ในแดชบอร์ด)
   setBusy(btn, true, 'กำลังบันทึก...');
   try {
     let now = secNow(); // ตัดเศษมิลลิวินาที → เวลาที่แสดงบนสลิป/ชีต กับระยะเวลาที่คำนวณ ตรงกันทุกวินาที
     // กรณีนาฬิกาถูกปรับย้อน (เช่นเริ่มพักตอนออฟไลน์แล้วภายหลังได้เวลา server) → ห้ามเวลากลับน้อยกว่าเวลาเริ่ม
     if (now < new Date(rec.start)) now = new Date(rec.start);
     rec.end = now.toISOString(); rec.durationSec = Math.max(0, Math.round((now - new Date(rec.start)) / 1000));
+    rec.actualEnd = ''; rec.actualReason = ''; // เวลาที่กด = เวลากลับจริง
     if (state.photos.end) { rec.photoEnd = state.photos.end; rec.photoEndAt = state.photoAt.end; }
     rec.updatedAt = now.toISOString(); rec.everSynced = rec.everSynced || rec.sync === 'synced'; rec.sync = 'pending';
     await DB.put(rec); clearPhoto('end'); state.overAlerted.delete(rec.id);
     const st = calcStatus(rec);
-    if (st === 'over') toast(`พักเกินเวลา ${fmtDur(rec.durationSec - recLimitSec(rec))} (รวม ${fmtDur(rec.durationSec)})`, 'warn', 6000);
+    if (st === 'over') toast(`พักเกินเวลา ${fmtDur(rec.durationSec - recLimitSec(rec))} (รวม ${fmtDur(rec.durationSec)}) • บันทึกเวลากลับ ${fmtTimeS(rec.end)} น.`, 'warn', 7000);
     else toast(`กลับจากพักเรียบร้อย ใช้เวลา ${fmtDur(rec.durationSec)}`);
     renderAll(); selectEmployee(emp.id); renderPending(); openSlip(rec);
-    syncRecord(rec, !rec.everSynced);
+    fireNow(rec); syncRecord(rec, !rec.everSynced);
   } catch (e) { toast('บันทึกไม่สำเร็จ: ' + e.message, 'err', 5000); }
   finally { setBusy(btn, false); }
 }
@@ -1273,7 +1316,7 @@ function deviceName() { try { return localStorage.getItem('sbk_break_device') ||
    - กันรูปเก่า: ไฟล์ที่เวลาสร้างห่างจากปัจจุบันเกิน PHOTO_MAX_AGE จะถูกปฏิเสธ
    - ลายน้ำ: วัน/เดือน/ปี (พ.ศ.) + เวลา (อ้างอิงเวลา server) + ชื่อ/รหัส + ช่วงพัก ฝังลงในภาพก่อนบันทึก
    ===================================================================== */
-const PHOTO_MAX = 1000, PHOTO_Q = 0.72, PHOTO_MAX_AGE_MS = 3 * 60000;
+const PHOTO_MAX = 1000, PHOTO_Q = 0.66, /* v16: ลดขนาดไฟล์ ~20% อัปโหลดเร็วขึ้นบนเน็ตมือถือ ภาพยังชัด */ PHOTO_MAX_AGE_MS = 3 * 60000;
 const isTouchDevice = () => window.matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window;
 const loadImage = src => new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('อ่านรูปไม่สำเร็จ (ไฟล์อาจเสียหรือเป็นชนิดที่ไม่รองรับ)')); i.src = src; });
 const readAsDataURL = file => new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = () => rej(new Error('อ่านไฟล์รูปไม่สำเร็จ')); fr.readAsDataURL(file); });
@@ -1595,6 +1638,14 @@ async function init() {
   fetchEmployees().then(list => { if (list.length) { state.employees = list; try { localStorage.setItem('sbk_break_emp', JSON.stringify(list)); } catch (e) {} } })
     .catch(() => {}).finally(() => { clockWarning(); });
   await pull(true); retryPending();
+  checkServerVersion();
+}
+// ตรวจว่า Apps Script ที่ Deploy อยู่ใหม่พอสำหรับฟอร์มเวอร์ชันนี้ — Deploy ไม่ตรงเป็นสาเหตุที่พบบ่อยของ "บันทึกไม่เข้า/ข้อมูลบางช่องหาย"
+const SERVER_MIN = 8;
+async function checkServerVersion() {
+  try { const r = await jsonp({ action: 'ping' }, 20000); const v = Number(String(r && r.version || '').replace(/\D/g, '')) || 0; state.serverVer = r && r.version;
+    if (v && v < SERVER_MIN) { toast(`Apps Script ที่ใช้งานอยู่เป็นเวอร์ชัน ${r.version} (ต้องการ v${SERVER_MIN} ขึ้นไป) — แจ้งผู้ดูแลระบบให้ Deploy Code_Break_v${SERVER_MIN}.gs เป็น New version`, 'warn', 12000); logError('server-version', new Error(String(r.version))); } }
+  catch (e) { /* ออฟไลน์ — ตรวจรอบหน้า */ }
 }
 document.addEventListener('DOMContentLoaded', init);
 
