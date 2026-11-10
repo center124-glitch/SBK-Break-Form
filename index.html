@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <!--
-  SBK_Break_Form_v18.html — แอปฟอร์มแจ้งพักพนักงาน (v18)
+  SBK_Break_Form_v19.html — แอปฟอร์มแจ้งพักพนักงาน (v19 — คู่กับ Dashboard_v17 / Code_Break_v9)
+  v19: บันทึกในเครื่องล้มเหลวไม่บล็อกการกดเริ่ม/กลับ, ลบรูปที่อัปโหลดแล้วออกจากเครื่อง (กันพื้นที่เต็ม), เตือนเมื่อยังไม่ได้เทียบเวลา server
   v18: เพิ่มสีสัน/อนิเมชัน (ขอบการ์ดไล่สีหมุน, สปอตไลต์, เข้าฉากทีละใบ, ประกายใน Hero, ปุ่มแสงวิ่ง+ระลอกคลื่น, ตัวเลขเด้ง, พลุเมื่อกลับตรงเวลา)
   v17: กด "กลับจากพัก" = บันทึกเวลาจริง ณ ตอนกดทันที (ยกเลิกหน้าต่างถามเวลากลับจริง/ตัวเลือก)
   v16: กดกลับจากพักเมื่อเกินเวลา → ถามว่ากลับถึงจุดจริงเวลาใด (กรณีลืมกด) บันทึก "เวลากลับจริง + เหตุผล" ไว้ด้วย
@@ -1245,13 +1246,13 @@ async function doSync(rec, isNew) {
       const n = normalizeRecord(sr);
       if (n) { ['end', 'durationSec', 'updatedAt', 'closedBy', 'note', 'limitMin'].forEach(k => rec[k] = n[k]); toast('ข้อมูลรายการนี้ถูกบันทึกจากอีกเครื่องก่อนแล้ว — แสดงตามข้อมูลในระบบ', 'info', 6000); }
     }
-    await DB.put(rec); setPill('ok', '● บันทึกแล้ว'); state.online = true;
+    await safePut(rec); setPill('ok', '● บันทึกแล้ว'); state.online = true;
     if (photoPending(rec)) syncPhotos(rec); // เวลาเข้าชีตแล้ว → ค่อยอัปโหลดรูป (เข้าคิวต่อท้าย)
   } else if (res.ok === false) {
     // server ปฏิเสธ (เช่น อีกเครื่องเริ่มพักให้พนักงานคนนี้ไปแล้ว) → ยกเลิกรายการในเครื่อง แล้วดึงข้อมูลจริงมาแสดง
     toast('บันทึกไม่สำเร็จ: ' + res.error, 'err', 7000);
     if (isNew) { state.records = state.records.filter(r => r.id !== rec.id); await DB.del(rec.id).catch(e => logError('db.del', e)); }
-    else { rec.sync = 'error'; rec.syncError = res.error; await DB.put(rec).catch(e => logError('db.put', e)); }
+    else { rec.sync = 'error'; rec.syncError = res.error; await safePut(rec); }
     setPill('err', '● ถูกปฏิเสธ'); await pull(true);
   } else {
     setPill('err', '● ค้างส่ง'); state.online = false;
@@ -1289,8 +1290,8 @@ async function doPhotos(rec) {
   if (res.ok === true) {
     const sr = res.res.record || {};
     rec.photoStartUrl = sr.photoStartUrl || rec.photoStartUrl; rec.photoEndUrl = sr.photoEndUrl || rec.photoEndUrl;
-    photoNext.delete(rec.id);
-    await DB.put(rec).catch(e => logError('db.put', e));
+    photoNext.delete(rec.id); dropUploadedPhotos(rec);
+    await safePut(rec);
   } else { bumpPhoto(rec.id); if (res.ok === false) logError('photos.rejected', new Error(res.error || '')); }
   renderPending();
 }
@@ -1363,12 +1364,13 @@ async function startBreak() {
   if (!requirePhoto('start')) return;
   setBusy(btn, true, 'กำลังบันทึก...');
   try {
+    if (!Clock.synced) toast('ยังไม่ได้เทียบเวลากับ server (ออฟไลน์) — ใช้นาฬิกาเครื่องนี้ กรุณาตรวจว่าเวลาเครื่องถูกต้อง', 'warn', 7000);
     const now = secNow(); // ตัดเศษมิลลิวินาที → เวลาที่แสดงบนสลิป/ชีต กับระยะเวลาที่คำนวณ ตรงกันทุกวินาที
     const rec = { id: uid(), date: dateKey(now), empId: emp.id, name: emp.name, position: emp.position, dept: emp.dept,
       breakNo: state.selBreak, start: now.toISOString(), end: null, durationSec: 0, limitMin: CONFIG.LIMIT_MIN,
       photoStart: state.photos.start, photoEnd: null, photoStartUrl: '', photoEndUrl: '', photoStartAt: state.photos.start ? state.photoAt.start : '', photoEndAt: '', note: $('#noteStart').value.trim(),
       device: deviceName(), closedBy: '', createdAt: now.toISOString(), updatedAt: now.toISOString(), sync: 'pending' };
-    await DB.put(rec); state.records.push(rec);
+    await safePut(rec); state.records.push(rec);
     clearPhoto('start'); $('#noteStart').value = '';
     toast(`เริ่มพักช่วงที่ ${rec.breakNo} เวลา ${fmtTime(rec.start)} น.`);
     renderAll(); selectEmployee(emp.id); renderPending();
@@ -1392,7 +1394,7 @@ async function endBreak() {
     rec.actualEnd = ''; rec.actualReason = ''; // เวลาที่กด = เวลากลับจริง
     if (state.photos.end) { rec.photoEnd = state.photos.end; rec.photoEndAt = state.photoAt.end; }
     rec.updatedAt = now.toISOString(); rec.everSynced = rec.everSynced || rec.sync === 'synced'; rec.sync = 'pending';
-    await DB.put(rec); clearPhoto('end'); state.overAlerted.delete(rec.id);
+    await safePut(rec); clearPhoto('end'); state.overAlerted.delete(rec.id);
     const st = calcStatus(rec);
     if (st === 'over') toast(`พักเกินเวลา ${fmtDur(rec.durationSec - recLimitSec(rec))} (รวม ${fmtDur(rec.durationSec)}) • บันทึกเวลากลับ ${fmtTimeS(rec.end)} น.`, 'warn', 7000);
     else toast(`กลับจากพักเรียบร้อย ใช้เวลา ${fmtDur(rec.durationSec)}`);
@@ -1402,6 +1404,21 @@ async function endBreak() {
   finally { setBusy(btn, false); }
 }
 const secNow = () => new Date(Math.floor(nowDate().getTime() / 1000) * 1000);
+/* v19: บันทึกลงเครื่องไม่สำเร็จ (พื้นที่เต็ม / โหมดไม่ระบุตัวตน / เบราว์เซอร์ใน LINE) ต้อง "ไม่" ทำให้กดเริ่ม/กลับจากพักไม่ได้
+   → เก็บไว้ในหน่วยความจำ แล้วส่งเข้า Google Sheets ตามปกติ (fireNow + คิว) พร้อมแจ้งเตือนครั้งเดียว */
+let _putWarned = false;
+async function safePut(rec) {
+  try { await DB.put(rec); }
+  catch (e) { logError('db.put', e);
+    if (!_putWarned) { _putWarned = true; toast(/quota/i.test(e && (e.name + e.message)) ? 'พื้นที่ในเครื่องเต็ม — ระบบยังส่งข้อมูลเข้า Google Sheets ตามปกติ (แนะนำล้างข้อมูลเบราว์เซอร์ที่ไม่ใช้)' : 'บันทึกข้อมูลในเครื่องไม่ได้ — ระบบยังส่งเข้า Google Sheets ตามปกติ กรุณาอย่าปิดแอปจนสลิปขึ้น "บันทึกเรียบร้อย"', 'warn', 8000); } }
+}
+// รูปขึ้น Drive แล้ว → ลบไฟล์รูปออกจากเครื่อง (สลิปจะโหลดจาก Drive แทน) — กันพื้นที่เต็มบนเครื่องประจำจุดที่ใช้ร่วมกันหลายคน
+function dropUploadedPhotos(r) {
+  let ch = false;
+  if (r.photoStart && r.photoStartUrl) { r.photoStart = null; ch = true; }
+  if (r.photoEnd && r.photoEndUrl) { r.photoEnd = null; ch = true; }
+  return ch;
+}
 function deviceName() { try { return localStorage.getItem('sbk_break_device') || ''; } catch (e) { return ''; } }
 
 /* =====================================================================
@@ -1709,7 +1726,9 @@ async function init() {
     const all = (await DB.all()) || [];
     // ล้างรายการเก่าที่ส่งสำเร็จแล้ว (เกิน 3 วัน) ลดพื้นที่ในเครื่อง — ข้อมูลจริงอยู่ใน Google Sheets
     const cut = dateKey(addDays(new Date(), -3));
-    state.records = all.filter(r => { const old = r.sync === 'synced' && r.date < cut && !photoPending(r); if (old) DB.del(r.id); return !old; });
+    state.records = all.filter(r => { const old = r.sync === 'synced' && r.date < cut && !photoPending(r); if (old) DB.del(r.id).catch(() => {}); return !old; });
+    // v19: ล้างรูปที่อัปโหลดขึ้น Drive แล้วออกจากเครื่อง (รายการเก่าของเวอร์ชันก่อนยังเก็บรูปไว้ทั้งก้อน)
+    state.records.forEach(r => { if (dropUploadedPhotos(r)) DB.put(r).catch(() => {}); });
   } catch (e) { toast('โหลดข้อมูลในเครื่องไม่สำเร็จ: ' + e.message, 'err'); }
   try { const c = JSON.parse(localStorage.getItem('sbk_break_emp') || 'null'); state.employees = Array.isArray(c) && c.length ? c : DEFAULT_EMP; } catch (e) { state.employees = DEFAULT_EMP; }
   live().filter(r => !r.end && elapsedSec(r) > recLimitSec(r)).forEach(r => state.overAlerted.add(r.id));
@@ -1736,7 +1755,7 @@ async function init() {
   checkServerVersion();
 }
 // ตรวจว่า Apps Script ที่ Deploy อยู่ใหม่พอสำหรับฟอร์มเวอร์ชันนี้ — Deploy ไม่ตรงเป็นสาเหตุที่พบบ่อยของ "บันทึกไม่เข้า/ข้อมูลบางช่องหาย"
-const SERVER_MIN = 8;
+const SERVER_MIN = 9;
 async function checkServerVersion() {
   try { const r = await jsonp({ action: 'ping' }, 20000); const v = Number(String(r && r.version || '').replace(/\D/g, '')) || 0; state.serverVer = r && r.version;
     if (v && v < SERVER_MIN) { toast(`Apps Script ที่ใช้งานอยู่เป็นเวอร์ชัน ${r.version} (ต้องการ v${SERVER_MIN} ขึ้นไป) — แจ้งผู้ดูแลระบบให้ Deploy Code_Break_v${SERVER_MIN}.gs เป็น New version`, 'warn', 12000); logError('server-version', new Error(String(r.version))); } }
